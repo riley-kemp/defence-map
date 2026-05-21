@@ -4,25 +4,13 @@
 //  This file builds and runs an interactive map showing where defence
 //  manufacturing facilities are located across Canada, broken down by
 //  Census Division (a geographic unit slightly larger than a county).
-//
-//  It uses two external libraries:
-//    • D3.js  — draws SVG graphics, handles colours, projections, and zoom
-//    • Papaparse (via d3.csvParse) — parses the CSV facility data
-//
-//  The code is wrapped in an "async IIFE" (immediately-invoked function
-//  expression) so that it runs on its own without polluting the global
-//  namespace, and so it can use `await` to fetch data before drawing.
 // ════════════════════════════════════════════════════════════════════════════
 
 (async function() {
 
   // ─── SECTION 1: DATA FETCHING ─────────────────────────────────────────────
-  //  Before anything can be drawn, two datasets need to be downloaded:
-  //    1. GeoJSON  — the geographic shapes of Canada's Census Divisions
-  //    2. CSV      — a list of individual defence facilities with metadata
 
   // Downloads the GeoJSON file that contains the shape of every Census Division
-  // in Canada (borders, names, IDs). Think of this as the "map outline" data.
   async function fetchGeoData() {
     const url = "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/data/Canada_CD.json";
     const response = await fetch(url);
@@ -32,7 +20,6 @@
   }
 
   // Downloads the CSV file listing individual defence facilities.
-  // Each row is one facility with columns describing its type, industry, and location.
   async function fetchCsvData() {
     const url = "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/data/defence_facilities.csv";
     const response = await fetch(url);
@@ -59,7 +46,6 @@
   //  Fixed values used throughout the application.
 
   // The internal coordinate space the SVG map is drawn in.
-  // These are NOT pixels — the SVG scales to fit the screen.
   const WIDTH = 1200;
   const HEIGHT = 800;
 
@@ -69,14 +55,12 @@
   // Maps internal CSV column keys to human-readable display labels.
   // Used to name filter chips and stats rows in the sidebar.
   const OPERATIONS_MAP = {
-    "General_Count_sum":  "All Defence Facilities",
     "Manufacturing_sum":  "Manufacturers",
     "Value-Add/Tech_sum": "Technology Development & Other Related Facilities",
     "MRO/ISS_sum":        "Maintenance, Repair, Overhaul/In-Service Support Facilities",
   };
 
   // Maps short CSV column codes to full industry names.
-  // These correspond to the defence sectors each facility serves.
   const INDUSTRY_KEYS = {
     "Aircraft":          "Aircraft",
     "CnISR":             "C4ISR",
@@ -94,17 +78,17 @@
   //  that the rest of the code can work with easily.
 
   // Helper: returns true if a CSV cell should be treated as "yes/true".
-  // CSV values like "true", "1", "TRUE" all count as true.
+  // Converts boolean csv values.
   const isTrue = (val) => val && (val.toString().toLowerCase() === "true" || val.toString() === "1");
 
   // Transform every row in the CSV into a structured facility object.
   // Each object stores:
   //   - id        : a unique index number
   //   - cduid     : the Census Division ID — links this facility to a map region
-  //   - isMfg     : is this a manufacturing facility?
-  //   - isTech    : is this a value-add / technology facility?
-  //   - isMro     : is this a maintenance, repair, and overhaul facility?
-  //   - isDefence : is this a general defence facility?
+  //   - isMfg     : is this a defence manufacturing facility
+  //   - isTech    : is this a value-add / defence technology facility
+  //   - isMro     : is this a defence maintenance, repair, and overhaul facility
+  //   - isDefence : is this a general facility count
   //   - industries: the set of defence industry sectors it belongs to
   //   - rawRow    : the original CSV row (kept for sub-category drill-downs)
   const allFacilities = rawCsv.map((row, index) => {
@@ -115,12 +99,11 @@
       isTech: isTrue(row["Value-Add"]),
       isMro: isTrue(row["MRO/ISS"]),
       isDefence: isTrue(row.General),
-      industries: new Set(),     // A Set avoids duplicates automatically
-      rawRow: row                // Retained for detailed breakdown tables
+      industries: new Set(),
+      rawRow: row
     };
 
     // Check each industry column and add it to the facility's industry set
-    // if the column value is truthy.
     Object.keys(INDUSTRY_KEYS).forEach(ind => {
       if (isTrue(row[ind])) facility.industries.add(ind);
     });
@@ -155,7 +138,7 @@
     isDark: window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false, // Respects the user's OS dark mode preference
     selectedFeature: null,             // The GeoJSON feature (Census Division) that is currently clicked/highlighted
     infoOpen: false,                   // Whether the "About this map" info panel is visible
-    sidebarOpen: true,                 // Whether the left sidebar is expanded
+    sidebarOpen: true,                 // Whether the left filter & census division information sidebar is expanded
     legendMin: 0,                      // Lowest facility count currently shown in the legend
     legendMax: 1,                      // Highest facility count currently shown in the legend
     legendColourScale: null,           // The D3 colour-scale function currently in use
@@ -236,7 +219,7 @@
   function getTooltipLabel(val) {
     const filtersActive = state.currentIndustries.size > 0 || state.currentAnalyticsKeys.size > 0;
     if (filtersActive) {
-      return `${val.toLocaleString()} ${val === 1 ? "Facility" : "Facilities"} (Matching active filters)`;
+      return `${val.toLocaleString()} ${val === 1 ? "Facility" : "Facilities"} (matching currently active filters)`;
     }
     return `${val.toLocaleString()} ${val === 1 ? "Facility" : "Facilities"}`;
   }
@@ -245,7 +228,7 @@
   // Called via getC() rather than directly (see caching above).
   function getColours(isDark) {
     return isDark
-      ? {
+      ? {// dark mode
           bg:          "#0e1117",             // Page background
           surface:     "#161b24",             // Card / sidebar background
           border:      "rgba(255,255,255,0.1)", // Subtle dividing lines
@@ -256,7 +239,7 @@
           noData:      "#2a3040",             // Region with facilities, but none match the filter
           noDataNone:  "#191d25"              // Region with zero defence facilities recorded
         }
-      : {
+      : {// light mode
           bg:          "#f8f9fa",
           surface:     "#ffffff",
           border:      "rgba(0,0,0,0.08)",
@@ -272,7 +255,8 @@
   // ─── SECTION 7: MOBILE DETECTION ─────────────────────────────────────────
   // Returns true when the viewport is 768px wide or narrower.
   // Used throughout to switch between mobile (bottom sheet) and desktop (sidebar) layouts.
-  const isMobile = () => window.innerWidth <= 768;
+  const isMobile = () => Math.min(window.innerWidth, window.innerHeight) <= 768;
+  const isLandscapeMobile = () => isMobile() && window.innerWidth > window.innerHeight;
 
   // ─── SECTION 8: DOM & LAYOUT SETUP ───────────────────────────────────────
   //  Builds the HTML structure of the whole application dynamically using D3.
@@ -322,7 +306,7 @@
     }
     #mobile-filter-toggle {
       position: absolute;
-      bottom: env(safe-area-inset-bottom, 16px);
+      bottom: max(16px, env(safe-area-inset-bottom, 16px));
       left: 50%;
       transform: translateX(-50%);
       z-index: 200;
@@ -370,12 +354,13 @@
   // The control panel is a floating column of icon buttons pinned to the
   // top-right corner of the map (info, theme toggle, zoom in/out, home).
   const controlPanel = container.append("div")
+    .attr("id", "control-panel")
     .style("position", "absolute")
-    .style("top", "max(20px, env(safe-area-inset-top, 20px))")
-    .style("right", "max(16px, env(safe-area-inset-right, 16px))")
+    .style("top", "max(12px, env(safe-area-inset-top, 12px))")
+    .style("right", "max(12px, env(safe-area-inset-right, 12px))")
     .style("z-index", "100")
-    .style("display", "flex")
-    .style("flex-direction", "column")
+    .style("display", "grid")
+    .style("grid-template-columns", isLandscapeMobile() ? "1fr 1fr" : "1fr")
     .style("gap", "6px");
 
   // Button dimensions adjust slightly larger on mobile for easier touch targets
@@ -383,44 +368,96 @@
   const btnPad    = isMobile() ? "10px 14px" : "8px 12px";
   const btnFontSz = isMobile() ? "16px" : "14px";
 
+  // Briefly flashes a button with the accent colour so the user gets tactile
+  // feedback that their tap/click registered.
+  // flashBtn: immediately paints the button accent, then restores after 220 ms.
+  // Pass skipRestore=true when the caller's updateUI/renderMap will repaint the
+  // button — otherwise the setTimeout would restore stale pre-theme-flip colours.
+  function flashBtn(btn, skipRestore = false) {
+    const c = getC();
+    btn.style("background", c.accent).style("color", "#fff").style("border", `1px solid ${c.accent}`);
+    if (!skipRestore) {
+      setTimeout(() => {
+        // Re-read colours at restore time so we always use the current theme
+        const cr = getC();
+        btn.style("background", cr.surface).style("color", cr.text).style("border", `1px solid ${cr.border}`);
+      }, 220);
+    }
+  }
+
+  // Helper: creates a styled control button and appends it to the panel
+  function makeBtn(label, ariaLabel) {
+    return controlPanel.append("button")
+      .text(label)
+      .attr("aria-label", ariaLabel)
+      .style("padding", btnPad)
+      .style("border-radius", "8px")
+      .style("cursor", "pointer")
+      .style("font-size", btnFontSz)
+      .style("width", btnSize)
+      .style("height", btnSize)
+      .style("transition", "background 0.15s ease, color 0.15s ease, border 0.15s ease, transform 0.2s ease");
+  }
+
   // ── Individual control buttons ──
 
   // "ⓘ" — opens/closes the "About this map" info panel
-  const infoBtn = controlPanel.append("button")
-    .text("ⓘ")
-    .attr("aria-label", "About this map")
-    .style("padding", btnPad)
-    .style("border-radius", "8px")
-    .style("cursor", "pointer")
-    .style("font-size", btnFontSz)
-    .style("width", btnSize)
-    .style("height", btnSize)
-    .style("margin-bottom", "4px") 
-    .on("click", () => {
-      // Toggle the info panel open or closed
+  const infoBtn = makeBtn("ⓘ", "About this map")
+    .on("click", function() {
+      flashBtn(d3.select(this));
       state.infoOpen = !state.infoOpen;
       infoSidebar.style("transform", state.infoOpen ? "translateX(0)" : "translateX(100%)");
     });
-  
+
   // "☾" / "☼" — toggles between dark mode and light mode
-  const themeToggle = controlPanel.append("button").attr("aria-label", "Toggle light / dark mode").style("padding", btnPad).style("border-radius", "8px").style("cursor", "pointer").style("font-size", btnFontSz).style("margin-bottom", "4px").style("width", btnSize).style("height", btnSize).style("transition", "all 0.3s ease").on("click", () => { state.isDark = !state.isDark; updateUI(); renderMap(); });
+  const themeToggle = makeBtn("☾", "Toggle light / dark mode")
+    .on("click", function() {
+      // skipRestore=true because updateUI() repaints all buttons with the new
+      // theme colours — we don't want the setTimeout to overwrite that.
+      flashBtn(d3.select(this), true);
+      state.isDark = !state.isDark;
+      updateUI();
+      renderMap();
+    });
 
-  // "+" / "−" — zoom buttons; hidden on mobile because users pinch-to-zoom instead
-  const zoomInBtn  = controlPanel.append("button").attr("aria-label", "Zoom in").style("padding", btnPad).style("border-radius", "8px").style("cursor", "pointer").style("font-size", btnFontSz).style("font-weight", "600").style("width", btnSize).style("height", btnSize).style("transition", "all 0.3s ease").style("display", isMobile() ? "none" : null).text("+").on("click", () => svg.transition().duration(350).call(zoom.scaleBy, 1.5));
-  const zoomOutBtn = controlPanel.append("button").attr("aria-label", "Zoom out").style("padding", btnPad).style("border-radius", "8px").style("cursor", "pointer").style("font-size", btnFontSz).style("font-weight", "600").style("margin-bottom", "4px").style("width", btnSize).style("height", btnSize).style("transition", "all 0.3s ease").style("display", isMobile() ? "none" : null).text("−").on("click", () => svg.transition().duration(350).call(zoom.scaleBy, 0.67));
+  // "⌂" — resets map to the full-Canada view
+  const homeBtn = makeBtn("⌂", "Reset map view")
+    .on("click", function() {
+      flashBtn(d3.select(this));
+      if (isMobile()) { state.sidebarOpen = false; updateSidebarToggle(); }
+      if (state.selectedFeature) resetView(); else zoomToFull();
+    });
 
-  // "⌂" — resets map to the full-Canada view; also closes the detail panel if open
-  const homeBtn    = controlPanel.append("button").attr("aria-label", "Reset map view").style("padding", btnPad).style("border-radius", "8px").style("cursor", "pointer").style("font-size", btnFontSz).style("width", btnSize).style("height", btnSize).style("transition", "all 0.3s ease").text("⌂").on("click", () => {
-    if (isMobile()) { state.sidebarOpen = false; updateSidebarToggle(); }
-    if (state.selectedFeature) resetView(); else zoomToFull();
-  });
+  // "↩" — clears all active filters (Operations + Industry)
+  const resetFiltersBtn = makeBtn("↩", "Reset all filters")
+    .on("click", function() {
+      flashBtn(d3.select(this));
+      clearAllFilters();
+    });
+
+  // "+" / "−" — zoom buttons; hidden on mobile (users pinch-to-zoom instead)
+  const zoomInBtn  = makeBtn("+", "Zoom in")
+    .style("display", isMobile() ? "none" : null)
+    .style("font-weight", "600")
+    .on("click", function() {
+      flashBtn(d3.select(this));
+      svg.transition().duration(350).call(zoom.scaleBy, 1.5);
+    });
+  const zoomOutBtn = makeBtn("−", "Zoom out")
+    .style("display", isMobile() ? "none" : null)
+    .style("font-weight", "600")
+    .on("click", function() {
+      flashBtn(d3.select(this));
+      svg.transition().duration(350).call(zoom.scaleBy, 0.67);
+    });
 
   // Attach tooltip labels to each button (visible on hover on desktop)
-  addBtnTooltip(infoBtn,     "About this map");
-  addBtnTooltip(themeToggle, "Toggle light / dark mode");
-  addBtnTooltip(zoomInBtn,   "Zoom in");
-  addBtnTooltip(zoomOutBtn,  "Zoom out");
-  addBtnTooltip(homeBtn,     "Reset view");
+  addBtnTooltip(infoBtn,         "About This Map");
+  addBtnTooltip(themeToggle,     "Toggle Light / Dark Mode");
+  addBtnTooltip(homeBtn,         "Reset View");
+  addBtnTooltip(resetFiltersBtn, "Reset All Filters");
+  addBtnTooltip(zoomInBtn,       "Zoom In");
+  addBtnTooltip(zoomOutBtn,      "Zoom Out");
 
   // The main layout wrapper sits the sidebar and map canvas side-by-side on desktop.
   const mainWrapper = container.append("div")
@@ -442,7 +479,7 @@
     // initially hidden below the viewport (translateY(100%)).
     sidebar
       .style("width", "100%")
-      .style("height", "clamp(220px, 55%, 70%)")
+      .style("height", "clamp(200px, min(55%, 280px), 55vh)")
       .style("bottom", "0")
       .style("left", "0")
       .style("padding", "0 18px 18px")
@@ -686,12 +723,6 @@
   // ─── SECTION 10: MAP PROJECTION & ZOOM ───────────────────────────────────
   //  A "projection" converts latitude/longitude coordinates from the GeoJSON
   //  into x/y pixel positions on the SVG canvas.
-  //
-  //  Canada spans a very wide range of latitudes and longitudes, so a
-  //  Conic Conformal projection is used — it minimises distortion across
-  //  the country by choosing two "standard parallels" (49° and 77°N) and
-  //  rotating the viewpoint to centre on Canada.
-
 	const projection = d3.geoConicConformal()
 	  .parallels([49, 77])
 	  .rotate([96, 0])
@@ -699,9 +730,7 @@
 	  .fitExtent([[10, 20], [WIDTH - 10, HEIGHT - 110]], fixedData);
 	const path = d3.geoPath().projection(projection);
 
-	// Track the current zoom transform independently
-	let currentTransform = d3.zoomIdentity;
-
+  //  Define the zoom functionality.
 	const zoom = d3.zoom()
 	  .scaleExtent([1, 40])
 	  .on("zoom", ({ transform }) => {
@@ -713,10 +742,7 @@
 	  });
 	svg.call(zoom);
 
-	// Remove the mapGroup transform — it's no longer needed
-	// since zoom is handled via viewBox now
-	mapGroup.attr("transform", null);
-
+  //  When provided a feature (i.e. a census division is pressed), calculate and provide the map position to zoom into.
 	function zoomToFeature(feature) {
 	  const [[x0, y0], [x1, y1]] = path.bounds(feature);
 	  const dx = x1 - x0; const dy = y1 - y0;
@@ -725,6 +751,7 @@
 	  svg.transition().duration(750).call(zoom.transform, d3.zoomIdentity.translate(translate[0], translate[1]).scale(scale));
 	}
 
+  //  Reset the map back to the initial view.
 	function zoomToFull() { 
 	  svg.transition().duration(750).call(zoom.transform, d3.zoomIdentity); 
 	}
@@ -1098,7 +1125,7 @@
     };
 
     const TECH_KEYS = {
-      "V_238": "Specialty Trade Contractors", "V_414": "Personal Goods Wholesalers",
+      "V_414": "Personal Goods Wholesalers",
       "V_416": "Building Material Wholesalers", "V_417": "Machinery & Equipment Wholesalers",
       "V_418": "Miscellaneous Wholesalers", "V_488": "Support Activities for Transport",
       "V_517": "Telecommunications Services", "V_518": "Data Processing & Hosting",
@@ -1227,8 +1254,7 @@
       .on("mouseenter", function() { if (!isMobile()) d3.select(this).style("background", state.isDark ? "rgba(78,204,163,0.12)" : "rgba(0,169,79,0.08)"); })
       .on("mouseleave", function() { if (!isMobile()) d3.select(this).style("background", "transparent"); });
 
-    // Attach the "Close" click listener again (belt-and-suspenders after HTML injection)
-    document.getElementById("sidebar-back").addEventListener("click", restoreMapAppearance);
+    // (Duplicate addEventListener removed — D3's .on("click") above is sufficient.)
 
     // Wire up the accordion expand/collapse toggle for each operations type row.
     // Clicking a row (or pressing Enter/Space on it) shows/hides its sub-rows
@@ -1269,11 +1295,30 @@
     showDefault();
 
     // Draw the donut slices. d3.pie() converts value counts to arc angles.
+    let _activeTouchSlice = null;
     g.selectAll("path").data(d3.pie().value(d => d.value).sort(null)(industryData)).join("path").attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)).attr("fill", d => INDUSTRY_COLOURS[d.data.label]).attr("stroke", c.bg).attr("stroke-width", 2).style("cursor", "pointer").style("transition", "d 0.15s ease")
       // On hover: expand the slice outward and show its sector name/count in the centre
       .on("mouseover", function(_, d) { d3.select(this).attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS + 6)(d)); cVal.text(d.data.value); cLab.text(d.data.label.toUpperCase()); })
       // On mouse-out: shrink the slice back and restore the default centre label
-      .on("mouseout", function(_, d) { d3.select(this).attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)(d)); showDefault(); });
+      .on("mouseout", function(_, d) { d3.select(this).attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)(d)); showDefault(); })
+      // Touch: tap to expand and show label; tap again or tap another to collapse
+      .on("touchstart", function(event, d) {
+        event.stopPropagation();
+        const self = d3.select(this);
+        if (_activeTouchSlice && _activeTouchSlice.node() !== this) {
+          _activeTouchSlice.attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)(_activeTouchSlice.datum()));
+        }
+        if (_activeTouchSlice && _activeTouchSlice.node() === this) {
+          self.attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)(d));
+          showDefault();
+          _activeTouchSlice = null;
+        } else {
+          self.attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS + 6)(d));
+          cVal.text(d.data.value);
+          cLab.text(d.data.label.toUpperCase());
+          _activeTouchSlice = self;
+        }
+      }, { passive: true });
 
     // Chart title below the donut
     svgD.append("text").attr("transform", `translate(0, ${SIZE + 20})`).style("font-size", "11px").style("font-weight", "600").style("letter-spacing", "1px").style("fill", c.muted).style("font-family", "Inter").text("DEFENCE INDUSTRIES SERVED");
@@ -1613,7 +1658,7 @@
       "Use the colour theme buttons in the legend to change the choropleth map palette.",
 	  "Toggle between dark mode (☾) and light mode (☼) display themes using the display theme button.",
     ];
-
+	// Display each usage tip in a bulleted list
     tipsList.forEach(tip => {
       const row = infoModal.append("div").style("display", "flex").style("gap", "8px").style("margin-bottom", "10px").style("align-items", "flex-start");
       row.append("span").style("color", c.accent).style("font-size", "10px").style("margin-top", "2px").text("▸");
@@ -1681,7 +1726,7 @@
       const label = this.getAttribute("data-label");
       const sel = state.currentAnalyticsKeys.has(key);
       d3.select(this)
-        .text(sel ? `✓ ${label}` : label)           // Add checkmark to selected chips
+        .text(sel ? `${label}` : label)
         .attr("aria-pressed", sel ? "true" : "false")
         .style("background", sel ? (state.isDark ? "rgba(78,204,163,0.2)" : "rgba(0,169,79,0.15)") : (state.isDark ? "rgba(255,255,255,0.05)" : "rgba(0,0,0,0.04)"))
         .style("color",      sel ? c.accent : c.muted)
@@ -1783,7 +1828,7 @@
     tooltip.style("background", c.surface).style("color", c.text).style("border", `1px solid ${c.border}`).style("box-shadow", state.isDark ? "0 10px 30px rgba(0,0,0,0.5)" : "0 10px 30px rgba(0,0,0,0.1)");
 
     // Hover highlight effect on all control panel buttons
-    [themeToggle, zoomInBtn, zoomOutBtn, homeBtn, infoBtn].forEach(btn => {
+    [themeToggle, zoomInBtn, zoomOutBtn, homeBtn, infoBtn, resetFiltersBtn].forEach(btn => {
       btn
         .style("background", c.surface)
         .style("color",      c.text)
@@ -1791,6 +1836,9 @@
         .on("mouseenter", function() { d3.select(this).style("border", `1px solid ${c.accent}`).style("transform", "scale(1.08)"); })
         .on("mouseleave", function() { d3.select(this).style("border", `1px solid ${c.border}`).style("transform", "scale(1)"); });
     });
+
+    // Re-apply grid layout in case orientation changed
+    controlPanel.style("grid-template-columns", isLandscapeMobile() ? "1fr 1fr" : "1fr");
 
     buildControlsDOM();        // Build the sidebar controls if not already built
     refreshControlsState();    // Apply current filter state to chip appearances
@@ -1839,7 +1887,7 @@
       .attr("stroke", c.bg)
       .attr("stroke-width", 0.5);
     // On mobile, close the bottom sheet when a region is deselected
-    if (isMobile() && wasSelected) {
+    if (isMobile()) {
       state.sidebarOpen = false;
       updateSidebarToggle();
     }
@@ -1854,20 +1902,32 @@
   }
 
   // ─── SECTION 20: RESIZE HANDLER ──────────────────────────────────────────
-  //  When the screen is resized across the mobile/desktop breakpoint
-  //  (e.g. rotating a tablet), tear down and rebuild the controls so
-  //  they use the correct mobile/desktop layout and sizing.
-  let _lastMobile = isMobile();
+  //  Full teardown-and-rebuild on any viewport width change (covers breakpoint
+  //  crossings and portrait↔landscape rotation). 150 ms debounce collapses the
+  //  burst of resize events fired during rotation into a single rebuild.
+  let _lastWidth  = window.innerWidth;
+  let _resizeTimer = null;
+
+  function _doRebuild() {
+    _lastWidth = window.innerWidth;
+    controlsDiv.selectAll("*").remove();
+    _controlsBuilt = false;
+    updateUI();
+    renderMap();
+  }
+
   window.addEventListener("resize", () => {
-    const nowMobile = isMobile();
-    if (nowMobile !== _lastMobile) {
-      _lastMobile = nowMobile;
-      controlsDiv.selectAll("*").remove();  // Clear all sidebar controls
-      _controlsBuilt = false;               // Allow buildControlsDOM() to run again
-      updateUI();
-      renderMap();
-    }
+    if (window.innerWidth === _lastWidth) return;
+    clearTimeout(_resizeTimer);
+    _resizeTimer = setTimeout(_doRebuild, 150);
   });
+
+  if (screen?.orientation) {
+    screen.orientation.addEventListener("change", () => {
+      clearTimeout(_resizeTimer);
+      _resizeTimer = setTimeout(_doRebuild, 150);
+    });
+  }
 
   // ─── SECTION 21: KEYBOARD SHORTCUT ───────────────────────────────────────
   // Pressing Escape while a region is selected deselects it and zooms out.
