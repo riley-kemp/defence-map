@@ -300,9 +300,14 @@
     @media (max-width: 768px) {
       .btn-wrap .btn-tip { display: none; }
     }
+    #mobile-sheet-handle-wrap {
+      flex-shrink: 0;
+      background: inherit;
+      padding: 16px 18px 14px;
+    }
     #mobile-sheet-handle {
       width: 36px; height: 4px; border-radius: 2px;
-      margin: 10px auto 4px; flex-shrink: 0;
+      margin: 0 auto;
     }
     #mobile-filter-toggle {
       position: absolute;
@@ -479,13 +484,16 @@
     // initially hidden below the viewport (translateY(100%)).
     sidebar
       .style("width", "100%")
-      .style("height", "clamp(200px, min(55%, 280px), 55vh)")
+      .style("height", "60vh")
       .style("bottom", "0")
       .style("left", "0")
-      .style("padding", "0 18px 18px")
+      .style("padding", "0")
+      .style("overflow", "hidden")
+      .style("display", "flex")
+      .style("flex-direction", "column")
       .style("border-radius", "16px 16px 0 0")
       .style("box-shadow", "0 -4px 24px rgba(0,0,0,0.18)")
-      .style("transform", "translateY(100%)")         // starts off-screen
+      .style("transform", "translateY(100%)")
       .style("transition", "transform 0.4s ease, background 0.3s ease, border 0.3s ease");
   } else {
     // On desktop: fixed-width panel on the left edge.
@@ -500,7 +508,11 @@
   // at once when collapsing the sidebar without altering each child element.
   const sidebarInnerContent = sidebar.append("div")
     .style("width", "100%")
-    .style("height", "100%");
+    .style("height", isMobile() ? null : "100%")
+    .style("flex", isMobile() ? "1 1 auto" : null)
+    .style("overflow-y", isMobile() ? "auto" : null)
+    .style("padding",    isMobile() ? "0 18px 18px" : null)
+    .style("box-sizing", "border-box");
 
   // The collapse/expand control differs between mobile and desktop:
   //  • Mobile:  a drag handle bar at the top of the bottom sheet
@@ -511,42 +523,99 @@
     // Touch-draggable handle bar at the top of the mobile bottom sheet.
     // A short swipe up opens it; a short swipe down closes it.
     // A very small movement (< 8px) is treated as a tap and toggles the state.
-    const handle = sidebar.insert("div", ":first-child")
-      .attr("id", "mobile-sheet-handle")
-      .style("background", "rgba(128,128,128,0.35)")
+    // handleWrap sits directly inside sidebarInnerContent as its first child,
+    // with position:sticky top:0 so it pins to the top of the scroll area —
+    // always visible above the logo/content regardless of scroll position.
+    const handleWrap = sidebar.insert("div", ":first-child")
+      .attr("id", "mobile-sheet-handle-wrap")
       .style("cursor", "grab")
-      .style("touch-action", "none"); // prevents page scrolling while dragging
+      .style("touch-action", "none")
+      .style("display", "flex")
+      .style("align-items", "center")
+      .style("justify-content", "center")
+      .style("position", "relative");
 
-    let dragStartY = null;
-    let sheetStartOpen = null;
+    // Centred drag pill
+    const handle = handleWrap.append("div")
+      .attr("id", "mobile-sheet-handle")
+      .style("background", "rgba(128,128,128,0.35)");
 
-    // Record the vertical finger position when the drag starts
-    handle.on("touchstart", function(event) {
+    // ✕ close button — pinned to the right of the handle row, inline with drag pill
+    handleWrap.append("button")
+      .attr("id", "mobile-sheet-close-btn")
+      .text("✕")
+      .style("position", "absolute")
+      .style("right", "18px")
+      .style("top", "50%")
+      .style("transform", "translateY(-50%)")
+      .style("background", "transparent")
+      .style("border", "none")
+      .style("font-size", "18px")
+      .style("line-height", "1")
+      .style("padding", "4px 6px")
+      .style("cursor", "pointer")
+      .style("color", "inherit")
+      .style("touch-action", "auto")
+      .on("touchstart", event => event.stopPropagation(), { passive: true })
+      .on("click", () => {
+        if (state.selectedFeature) {
+          restoreMapAppearance();
+        } else {
+          state.sidebarOpen = false;
+          updateSidebarToggle();
+        }
+      });
+
+    let dragStartY  = null;
+    let dragStartH  = null;
+    let _userSetHeight = null; // last height user dragged to; null = use default
+
+    const CLOSE_RATIO     = 0.20;
+    const DEFAULT_H_RATIO = 0.60;
+
+    function getMaxSheetH() {
+      const panel = document.getElementById("control-panel");
+      return panel
+        ? window.innerHeight - (panel.getBoundingClientRect().bottom + 16)
+        : window.innerHeight * 0.85;
+    }
+
+    // Attach drag to the whole handleWrap for a generous ~26px touch target
+    handleWrap.on("touchstart", function(event) {
       dragStartY = event.touches[0].clientY;
-      sheetStartOpen = state.sidebarOpen;
+      dragStartH = sidebar.node().getBoundingClientRect().height;
+      sidebar.style("transition", "background 0.3s ease, border 0.3s ease");
       event.preventDefault();
     }, { passive: false });
 
-    // Decide open/close when the finger lifts
-    handle.on("touchend", function(event) {
+    handleWrap.on("touchmove", function(event) {
       if (dragStartY === null) return;
-      const dy = event.changedTouches[0].clientY - dragStartY;
-      const wasSmallTap = Math.abs(dy) < 8;
-      if (wasSmallTap) {
-        // Treat tiny movement as a tap — toggle current state
-        state.sidebarOpen = !state.sidebarOpen;
+      const dy   = event.touches[0].clientY - dragStartY;
+      const newH = Math.min(Math.max(dragStartH - dy, 40), getMaxSheetH());
+      sidebar.style("height", newH + "px");
+      event.preventDefault();
+    }, { passive: false });
+
+    handleWrap.on("touchend", function(event) {
+      if (dragStartY === null) return;
+      const dy   = event.changedTouches[0].clientY - dragStartY;
+      const curH = sidebar.node().getBoundingClientRect().height;
+      const scrH = window.innerHeight;
+      sidebar.style("transition", "transform 0.35s ease, height 0.35s ease, background 0.3s ease, border 0.3s ease");
+      if (curH < scrH * CLOSE_RATIO) {
+        // Below threshold: forget user height, reset to default, close
+        _userSetHeight = null;
+        sidebar.style("height", (scrH * DEFAULT_H_RATIO) + "px");
+        state.sidebarOpen = false;
       } else {
-        // Swipe up (dy < 0) → open; swipe down (dy > 0) → close
-        state.sidebarOpen = dy < 0;
+        // User settled at custom height — remember it
+        _userSetHeight = curH;
+        state.sidebarOpen = true;
       }
       dragStartY = null;
+      dragStartH = null;
       updateSidebarToggle();
     });
-
-    // Block the page from scrolling while the user is dragging the handle
-    handle.on("touchmove", function(event) {
-      event.preventDefault();
-    }, { passive: false });
 
     // Floating "▲ FILTERS" pill button at the bottom of the map.
     // Only visible when the bottom sheet is closed, giving users a clear way
@@ -589,34 +658,7 @@
   const controlsDiv = sidebarInnerContent.append("div").style("margin-bottom", "40px");
   const detailsDiv  = sidebarInnerContent.append("div");
 
-  // Mobile only: a close (✕) button row at the very top of the sheet content.
-  // Visible only when the sheet is open. If a region is selected, clicking ✕
-  // deselects it and restores the map; otherwise it just collapses the sheet.
-  if (isMobile()) {
-    const closeRow = sidebarInnerContent.insert("div", ":first-child")
-      .attr("id", "mobile-sheet-close")
-      .style("display", "none")           // shown/hidden by updateSidebarToggle()
-      .style("justify-content", "flex-end")
-      .style("padding", "6px 0 2px");
 
-    closeRow.append("button")
-      .text("✕")
-      .style("background", "transparent")
-      .style("border", "none")
-      .style("font-size", "18px")
-      .style("line-height", "1")
-      .style("padding", "4px 6px")
-      .style("cursor", "pointer")
-      .style("color", "inherit")
-      .on("click", () => {
-        if (state.selectedFeature) {
-          restoreMapAppearance(); // Clear region selection and close sheet
-        } else {
-          state.sidebarOpen = false;
-          updateSidebarToggle();
-        }
-      });
-  }
 
   // The "About" info panel — slides in from the right edge of the screen.
   // Triggered by the ⓘ button in the control panel.
@@ -693,12 +735,16 @@
 
   // The legend overlay box (bottom-right on desktop, top-left on mobile).
   // Shows the colour scale and swatch key for the choropleth.
+  // On mobile the legend top matches the control panel (max(12px,...)) and its
+  // Mobile legend height = 3 buttons × 44px + 2 gaps × 6px, same in both portrait and landscape
+  const _legendH = isMobile() ? "144px" : null;
   const legendOverlay = mapContainer.append("div")
     .style("position", "absolute")
     .style("bottom", isMobile() ? null : "30px")
-    .style("top",    isMobile() ? "max(20px, env(safe-area-inset-top, 20px))" : null)
+    .style("top",    isMobile() ? "max(12px, env(safe-area-inset-top, 12px))" : null)
     .style("left",   isMobile() ? "10px" : null)
     .style("right",  isMobile() ? null   : "30px")
+    .style("height", _legendH)
     .style("backdrop-filter", "blur(15px)")
     .style("padding", isMobile() ? "10px 12px" : "20px")
     .style("border-radius", "6px")
@@ -765,11 +811,10 @@
     if (isMobile()) {
       const c = getC();
       if (state.sidebarOpen) {
-        // Slide the sheet up to show it
+        sidebar.style("height", (typeof _userSetHeight === "number"
+          ? _userSetHeight : (window.innerHeight * 0.60)) + "px");
         sidebar.style("transform", "translateY(0)");
-        // Hide the "▲ FILTERS" pill (the sheet's ✕ button handles closing)
         d3.select("#mobile-filter-toggle").style("display", "none");
-        d3.select("#mobile-sheet-close").style("display", "flex");
       } else {
         // Slide the sheet off the bottom of the screen
         sidebar.style("transform", "translateY(100%)");
@@ -779,7 +824,7 @@
           .style("background", c.accent)
           .style("color", "#fff")
           .style("border", `1px solid ${c.accent}`);
-        d3.select("#mobile-sheet-close").style("display", "none");
+
       }
       return;
     }
@@ -809,7 +854,7 @@
 
     legendOverlay.selectAll("*").remove(); // Clear any previous legend content
 
-    legendOverlay.append("div").style("font-size", "10px").style("font-weight", "600").style("letter-spacing", "1.2px").style("margin-bottom", "12px").style("color", c.muted).text("DEFENCE FACILITY COUNT");
+    legendOverlay.append("div").style("font-size", "10px").style("font-weight", "600").style("letter-spacing", "1.2px").style("margin-bottom", isMobile() ? "6px" : "12px").style("color", c.muted).text("DEFENCE FACILITY COUNT");
 
     // Create an SVG inside the legend for the gradient bar
     const svgL = legendOverlay.append("svg").attr("id", "legend-bar-svg").attr("width", BAR_WIDTH).attr("height", 38).style("display", "block");
@@ -847,15 +892,15 @@
     }
 
     // Swatch legend: two coloured squares explaining the two "no data" grey shades
-    const swatchDiv = legendOverlay.append("div").style("margin-top", "12px");
+    const swatchDiv = legendOverlay.append("div").style("margin-top", isMobile() ? "6px" : "12px");
     [{ color: c.noData, label: "No defence facilities with the current filters" }, { color: c.noDataNone, label: "No defence facilities recorded" }].forEach(({ color, label }) => {
-      const row = swatchDiv.append("div").style("display", "flex").style("align-items", "flex-start").style("gap", "8px").style("margin-bottom","6px");
+      const row = swatchDiv.append("div").style("display", "flex").style("align-items", "flex-start").style("gap", "8px").style("margin-bottom", isMobile() ? "3px" : "6px");
       row.append("div").style("width", "16px").style("min-width", "16px").style("height", "10px").style("margin-top", "2px").style("border-radius","2px").style("background", color);
       row.append("span").style("font-size", "10px").style("color", c.muted).style("line-height", "1.4").style("word-break", "break-word").text(label);
     });
 
     // Theme switcher buttons below the gradient bar
-    legendOverlay.append("div").style("margin-top", "15px").style("display", "flex").style("justify-content", "space-between").style("gap", "4px").selectAll("button").data(Object.keys(COLOUR_THEMES)).join("button")
+    legendOverlay.append("div").style("margin-top", isMobile() ? "6px" : "15px").style("display", "flex").style("justify-content", "space-between").style("gap", "4px").selectAll("button").data(Object.keys(COLOUR_THEMES)).join("button")
       .text(d => d).style("flex", "1").style("background", d => d === state.currentTheme ? (state.isDark ? "rgba(78,204,163,0.1)" : "rgba(5,150,105,0.1)") : "transparent").style("color", d => d === state.currentTheme ? c.accent : c.muted).style("border", d => d === state.currentTheme ? `1px solid ${c.accent}` : `1px solid ${c.border}`).style("padding", "5px 0").style("font-size", "8.5px").style("cursor", "pointer").style("border-radius", "3px").style("text-transform", "uppercase").style("font-family", "'Inter', sans-serif").style("transition", "all 0.2s ease")
       .on("mouseenter", function(_, d) { if (d !== state.currentTheme) d3.select(this).style("border", `1px solid ${c.accent}`).style("transform", "scale(1.08)"); })
       .on("mouseleave", function(_, d) { if (d !== state.currentTheme) d3.select(this).style("border", `1px solid ${c.border}`).style("transform", "scale(1)"); })
@@ -1005,29 +1050,19 @@
           zoomToFeature(d);       // Animate the map zooming in on the selected region
           updateSidebarDetail();  // Populate the sidebar with this region's data
 
-          // Scroll the sidebar so the region name and donut chart are visible.
-          // The timeout gives the browser time to finish rendering the new content
-          // before we try to measure element positions for the scroll calculation.
+          // Scroll the correct container so the census division name is visible near the top.
           setTimeout(() => {
-            const sidebarEl = sidebar.node();
-            const detailEl  = detailsDiv.node();
-            if (!sidebarEl || !detailEl) return;
             if (isMobile()) {
-              sidebarEl.scrollTop = detailEl.offsetTop - 8;
+              // offsetTop is relative to sidebar (the offset parent), but sidebarInnerContent
+              // is the scroll container — subtract its offsetTop to get the scroll position.
+              const scrollEl = sidebarInnerContent.node();
+              if (scrollEl) {
+                const scrollTop = detailsDiv.node().offsetTop - sidebarInnerContent.node().offsetTop;
+                scrollEl.scrollTo({ top: scrollTop, behavior: "smooth" });
+              }
             } else {
-              // Target: scroll so the region name sits near the top with a small gap
-              const idealTop = detailEl.offsetTop - 16;
-
-              // Safety check: also ensure the donut chart bottom is fully in view.
-              // If the donut hasn't rendered yet (height = 0), fall back to idealTop.
-              const donutEl = document.getElementById("donut-chart");
-              const donutBottom = donutEl
-                ? donutEl.offsetTop + donutEl.offsetHeight + 16
-                : 0;
-              const minScrollTop = donutBottom - sidebarEl.clientHeight;
-
-              const scrollTarget = Math.max(idealTop, minScrollTop);
-              sidebarEl.scrollTo({ top: scrollTarget, behavior: "smooth" });
+              const scrollEl = sidebar.node();
+              if (scrollEl) scrollEl.scrollTo({ top: detailsDiv.node().offsetTop - 16, behavior: "smooth" });
             }
           }, 50);
         })
@@ -1060,7 +1095,7 @@
 
     // If no region is selected, show a prompt inviting the user to click one
     if (!state.selectedFeature) {
-      detailsDiv.html(`<p style="color:${c.muted}; font-size:14px; font-weight:400;">Select a census division to analyse specific industry metrics.</p>`);
+      detailsDiv.html(`<p style="color:${c.muted}; font-size:14px; font-weight:400; padding-bottom:32px;">Select a census division to analyse specific industry metrics.</p>`);
       return;
     }
 
@@ -1194,6 +1229,7 @@
         .append("button")
         .attr("id", "sidebar-back")
         .text(isMobile() ? "✕" : "CLOSE CENSUS DIVISION DETAILS")
+        .style("display", isMobile() ? "none" : null)
         .style("font-family", "'Inter', sans-serif")
         .style("font-size", isMobile() ? "18px" : "9px")
         .style("font-weight", isMobile() ? "400" : "600")
@@ -1237,6 +1273,7 @@
       .append("button")
       .attr("id", "sidebar-back")
       .text(isMobile() ? "✕" : "CLOSE CENSUS DIVISION DETAILS")
+      .style("display", isMobile() ? "none" : null)
       .style("font-family", "'Inter', sans-serif")
       .style("font-size", isMobile() ? "18px" : "9px")
       .style("font-weight", isMobile() ? "400" : "600")
@@ -1362,8 +1399,8 @@
       .style("align-items", "center");
 
     const logoUrl = state.isDark
-      ? "assets/Trillium_full_color_ondark.svg"
-      : "assets/Trillium_full_color_onlight.svg";
+      ? "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/assets/Trillium_full_color_ondark.svg"
+      : "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/assets/Trillium_full_color_onlight.svg";
 
     const logoLink = logoContainer.append("a")
       .attr("href", "https://trilliummfg.ca/")
@@ -1703,8 +1740,8 @@
     const logoImg = document.getElementById("logo-img");
     if (logoImg) {
       logoImg.src = state.isDark
-        ? "assets/Trillium_full_color_ondark.svg"
-        : "assets/Trillium_full_color_onlight.svg";
+        ? "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/assets/Trillium_full_color_ondark.svg"
+        : "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/assets/Trillium_full_color_onlight.svg";
     }
 
     // Determine which groups of filters are currently active
@@ -1837,8 +1874,9 @@
         .on("mouseleave", function() { d3.select(this).style("border", `1px solid ${c.border}`).style("transform", "scale(1)"); });
     });
 
-    // Re-apply grid layout in case orientation changed
+    // Re-apply grid layout and legend height in case orientation changed
     controlPanel.style("grid-template-columns", isLandscapeMobile() ? "1fr 1fr" : "1fr");
+    legendOverlay.style("height", isMobile() ? "144px" : null);
 
     buildControlsDOM();        // Build the sidebar controls if not already built
     refreshControlsState();    // Apply current filter state to chip appearances
@@ -1853,10 +1891,9 @@
   function clearAllFilters() {
     state.currentAnalyticsKeys.clear();
     state.currentIndustries.clear();
-    state.industryFilterMode = "and";
+    // industryFilterMode is intentionally NOT reset — it's a UX preference, not a filter
     renderMap();
     refreshControlsState();
-    // If a region is selected, refresh its detail panel to reflect no-filter counts
     if (state.selectedFeature) updateSidebarDetail();
   }
   
