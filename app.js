@@ -570,7 +570,7 @@
     let dragStartH  = null;
     let _userSetHeight = null; // last height user dragged to; null = use default
 
-    const CLOSE_RATIO     = 0.20;
+    const CLOSE_RATIO     = 0.35;
     const DEFAULT_H_RATIO = 0.60;
 
     function getMaxSheetH() {
