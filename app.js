@@ -137,6 +137,7 @@
     currentTheme: "Classic",           // Which colour theme is applied to the choropleth
     isDark: window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false, // Respects the user's OS dark mode preference
     selectedFeature: null,             // The GeoJSON feature (Census Division) that is currently clicked/highlighted
+    hoveredFeature: null,              // The GeoJSON feature currently under the mouse cursor (desktop)
     infoOpen: false,                   // Whether the "About this map" info panel is visible
     sidebarOpen: true,                 // Whether the left filter & census division information sidebar is expanded
     legendMin: 0,                      // Lowest facility count currently shown in the legend
@@ -160,58 +161,64 @@
   // Call this whenever dark mode is toggled to force a fresh palette on next render.
   function invalidateColourCache() { _cachedColours = null; }
 
-  // Returns true if a given map region (feature) has at least one
-  // defence facility recorded, regardless of active filters.
-  // Used to decide whether clicking a region should do anything.
+  // Pre-built set of all CDUIDs that have at least one defence facility.
+  // hasAnyData() never changes so we compute it once at startup rather than
+  // scanning allFacilities on every render pass.
+  const _cduidsWithData = new Set(
+    allFacilities.filter(f => f.isDefence).map(f => f.cduid)
+  );
   function hasAnyData(feature) {
     const geoId = (feature.properties.CDUID || feature.properties.cduid || feature.properties.CD_UID)?.toString().trim();
-    return allFacilities.some(f => f.cduid === geoId && f.isDefence);
+    return _cduidsWithData.has(geoId);
   }
+
+  // Cache of cduid → filtered facility count, invalidated on every filter/render change.
+  // Avoids re-scanning allFacilities for every region multiple times per render.
+  let _filteredValueCache = null;
+  function invalidateFilteredValueCache() { _filteredValueCache = null; }
 
   // Returns how many facilities in a given region pass ALL currently active filters.
   // This number determines the colour intensity of the region on the map.
   function getFilteredValue(feature) {
-    const geoId = (feature.properties.CDUID || feature.properties.cduid || feature.properties.CD_UID)?.toString().trim();
+    // Build the cache on first call within a render pass
+    if (!_filteredValueCache) {
+      // Hoist filter state outside the per-facility loop
+      const analyticsActive = state.currentAnalyticsKeys.size > 0;
+      const industriesActive = state.currentIndustries.size > 0;
+      const includes = industriesActive
+        ? [...state.currentIndustries.entries()].filter(([, s]) => s === "include").map(([ind]) => ind)
+        : [];
+      const excludes = industriesActive
+        ? [...state.currentIndustries.entries()].filter(([, s]) => s === "exclude").map(([ind]) => ind)
+        : [];
 
-    // Start with all defence facilities in this region
-    let matches = allFacilities.filter(f => f.cduid === geoId && f.isDefence);
-  
-    // If "Operations" filter chips are active, only keep facilities matching
-    // at least one selected operation type (Manufacturing, Tech, or MRO).
-    if (state.currentAnalyticsKeys.size > 0) {
-      matches = matches.filter(f => {
-        const matchesMfg = state.currentAnalyticsKeys.has("Manufacturing_sum") && f.isMfg;
-        const matchesTech = state.currentAnalyticsKeys.has("Value-Add/Tech_sum") && f.isTech;
-        const matchesMro = state.currentAnalyticsKeys.has("MRO/ISS_sum") && f.isMro;
-        
-        return matchesMfg || matchesTech || matchesMro;
-      });
-    } else {
-      // No operations filter active — keep all defence facilities
-      matches = matches.filter(f => f.isDefence);
+      _filteredValueCache = new Map();
+      for (const f of allFacilities) {
+        if (!f.isDefence) continue;
+
+        if (analyticsActive) {
+          const ok = (state.currentAnalyticsKeys.has("Manufacturing_sum") && f.isMfg)
+                  || (state.currentAnalyticsKeys.has("Value-Add/Tech_sum") && f.isTech)
+                  || (state.currentAnalyticsKeys.has("MRO/ISS_sum")        && f.isMro);
+          if (!ok) continue;
+        }
+
+        if (industriesActive) {
+          if (excludes.some(ind => f.industries.has(ind))) continue;
+          if (includes.length > 0) {
+            const passes = state.industryFilterMode === "and"
+              ? includes.every(ind => f.industries.has(ind))
+              : includes.some(ind => f.industries.has(ind));
+            if (!passes) continue;
+          }
+        }
+
+        _filteredValueCache.set(f.cduid, (_filteredValueCache.get(f.cduid) ?? 0) + 1);
+      }
     }
-    
-    // If industry filter chips are active, apply include/exclude logic.
-    if (state.currentIndustries.size > 0) {
-      matches = matches.filter(f => {
-        // Separate the chips into two lists: ones the user wants to include vs exclude
-        const includes = [...state.currentIndustries.entries()].filter(([, s]) => s === "include").map(([ind]) => ind);
-        const excludes = [...state.currentIndustries.entries()].filter(([, s]) => s === "exclude").map(([ind]) => ind);
-        
-        // If the facility belongs to any excluded industry, remove it
-        if (excludes.some(ind => f.industries.has(ind))) return false;
-        // If no includes are set, all remaining facilities pass
-        if (includes.length === 0) return true;
-        
-        // AND mode: facility must belong to ALL included industries
-        // OR mode:  facility must belong to AT LEAST ONE included industry
-        return state.industryFilterMode === "and"
-          ? includes.every(ind => f.industries.has(ind))
-          : includes.some(ind => f.industries.has(ind));
-      });
-    }
-  
-    return matches.length;
+
+    const geoId = (feature.properties.CDUID || feature.properties.cduid || feature.properties.CD_UID)?.toString().trim();
+    return _filteredValueCache.get(geoId) ?? 0;
   }
 
   // Builds the text shown in the hover tooltip over a region on the map.
@@ -222,6 +229,23 @@
       return `${val.toLocaleString()} ${val === 1 ? "Facility" : "Facilities"} (matching currently active filters)`;
     }
     return `${val.toLocaleString()} ${val === 1 ? "Facility" : "Facilities"}`;
+  }
+
+  // Attaches a tap-safe click handler to a D3 selection.
+  // On mobile, touchend fires first and we call preventDefault() to stop the
+  // browser generating a synthetic click ~300ms later — preventing every button
+  // from firing twice per tap. On desktop the normal click handler is used.
+  function onTap(selection, fn) {
+    return selection
+      .on("touchend", function(event) {
+        event.preventDefault();
+        fn.call(this, event);
+      })
+      .on("click", function(event) {
+        // Ignore clicks on touch devices — already handled by touchend above.
+        if (event.pointerType === "touch") return;
+        fn.call(this, event);
+      });
   }
 
   // Returns the full set of UI colours for the current dark/light mode.
@@ -326,8 +350,52 @@
       transition: all 0.3s ease;
       white-space: nowrap;
     }
+
+    /* ── Accessibility: visible focus indicators ── */
+    path.cd-region:focus,
+    path.cd-region:focus-visible {
+      outline: none;
+    }
+    button:focus-visible {
+      outline: 3px solid #00a94f;
+      outline-offset: 2px;
+    }
+
+    /* ── Screen-reader-only utility ── */
+    .sr-only {
+      position: absolute;
+      width: 1px;
+      height: 1px;
+      padding: 0;
+      margin: -1px;
+      overflow: hidden;
+      clip: rect(0,0,0,0);
+      white-space: nowrap;
+      border: 0;
+    }
   `;
   document.head.appendChild(btnTooltipStyle);
+
+  // ── Accessibility: live region for screen-reader filter announcements ──
+  // Updated whenever filters change so screen readers announce the new state.
+  const a11yAnnouncer = document.createElement("div");
+  a11yAnnouncer.id = "a11y-announcer";
+  a11yAnnouncer.className = "sr-only";
+  a11yAnnouncer.setAttribute("aria-live", "polite");
+  a11yAnnouncer.setAttribute("aria-atomic", "true");
+  document.body.appendChild(a11yAnnouncer);
+
+  function announceFilterUpdate() {
+    const min = state.legendMin;
+    const max = state.legendMax;
+    const filtersActive = state.currentIndustries.size > 0 || state.currentAnalyticsKeys.size > 0;
+    const msg = filtersActive
+      ? `Filtered view updated. The legend now ranges from ${min} to ${max} facilities.`
+      : `Filters cleared. The legend now ranges from ${min} to ${max} facilities.`;
+    a11yAnnouncer.textContent = "";
+    // Small timeout lets the DOM settle so the mutation is picked up by screen readers
+    setTimeout(() => { a11yAnnouncer.textContent = msg; }, 50);
+  }
 
   // Wraps a button element in a <div> and appends a hidden tooltip <span>.
   // The tooltip becomes visible on hover via the CSS above.
@@ -407,38 +475,36 @@
   // ── Individual control buttons ──
 
   // "ⓘ" — opens/closes the "About this map" info panel
-  const infoBtn = makeBtn("ⓘ", "About this map")
-    .on("click", function() {
-      flashBtn(d3.select(this));
-      state.infoOpen = !state.infoOpen;
-      infoSidebar.style("transform", state.infoOpen ? "translateX(0)" : "translateX(100%)");
-    });
+  const infoBtn = makeBtn("ⓘ", "About this map");
+  onTap(infoBtn, function() {
+    flashBtn(d3.select(this));
+    state.infoOpen = !state.infoOpen;
+    infoSidebar.style("transform", state.infoOpen ? "translateX(0)" : "translateX(100%)");
+  });
 
   // "☾" / "☼" — toggles between dark mode and light mode
-  const themeToggle = makeBtn("☾", "Toggle light / dark mode")
-    .on("click", function() {
-      // skipRestore=true because updateUI() repaints all buttons with the new
-      // theme colours — we don't want the setTimeout to overwrite that.
-      flashBtn(d3.select(this), true);
-      state.isDark = !state.isDark;
-      updateUI();
-      renderMap();
-    });
+  const themeToggle = makeBtn("☾", "Toggle light / dark mode");
+  onTap(themeToggle, function() {
+    flashBtn(d3.select(this), true);
+    state.isDark = !state.isDark;
+    updateUI();
+    renderMap();
+  });
 
   // "⌂" — resets map to the full-Canada view
-  const homeBtn = makeBtn("⌂", "Reset map view")
-    .on("click", function() {
-      flashBtn(d3.select(this));
-      if (isMobile()) { state.sidebarOpen = false; updateSidebarToggle(); }
-      if (state.selectedFeature) resetView(); else zoomToFull();
-    });
+  const homeBtn = makeBtn("⌂", "Reset map view");
+  onTap(homeBtn, function() {
+    flashBtn(d3.select(this));
+    if (isMobile()) { state.sidebarOpen = false; updateSidebarToggle(); }
+    if (state.selectedFeature) resetView(); else zoomToFull();
+  });
 
   // "↩" — clears all active filters (Operations + Industry)
-  const resetFiltersBtn = makeBtn("↩", "Reset all filters")
-    .on("click", function() {
-      flashBtn(d3.select(this));
-      clearAllFilters();
-    });
+  const resetFiltersBtn = makeBtn("↩", "Reset all filters");
+  onTap(resetFiltersBtn, function() {
+    flashBtn(d3.select(this));
+    clearAllFilters();
+  });
 
   // "+" / "−" — zoom buttons; hidden on mobile (users pinch-to-zoom instead)
   const zoomInBtn  = makeBtn("+", "Zoom in")
@@ -571,7 +637,7 @@
     let _userSetHeight = null; // last height user dragged to; null = use default
 
     const CLOSE_RATIO     = 0.35;
-    const DEFAULT_H_RATIO = 0.60;
+    const DEFAULT_H_RATIO = 0.65;
 
     function getMaxSheetH() {
       const panel = document.getElementById("control-panel");
@@ -607,6 +673,8 @@
         _userSetHeight = null;
         sidebar.style("height", (scrH * DEFAULT_H_RATIO) + "px");
         state.sidebarOpen = false;
+        // Sliding the sheet down deselects the census division (same as pressing ✕)
+        if (state.selectedFeature) restoreMapAppearance();
       } else {
         // User settled at custom height — remember it
         _userSetHeight = curH;
@@ -622,11 +690,11 @@
     // to reopen it.
     collapseBtn = container.append("button")
       .attr("id", "mobile-filter-toggle")
-      .text("▲  FILTERS")
-      .on("click", () => {
-        state.sidebarOpen = !state.sidebarOpen;
-        updateSidebarToggle();
-      });
+      .text("▲  FILTERS");
+    onTap(collapseBtn, () => {
+      state.sidebarOpen = !state.sidebarOpen;
+      updateSidebarToggle();
+    });
   } else {
     // Desktop: small circular button positioned at the right edge of the sidebar.
     // Shows ◀ when open (click to collapse) and ▶ when closed (click to expand).
@@ -694,7 +762,7 @@
   // On desktop only: show a tooltip label when hovering the collapse/expand button
   if (!isMobile()) {
     collapseBtn
-      .on("mouseenter.tip", function(event) {
+      .on("mouseenter.tip", function() {
         const label = state.sidebarOpen ? "Close side panel" : "Open side panel";
         const rect = this.getBoundingClientRect();
         tooltip
@@ -726,6 +794,7 @@
   .style("width", "100%")
   .style("height", "100%")
   .style("shape-rendering", "geometricPrecision")
+  .style("touch-action", "none")  // Required for D3 zoom to receive touch events in Firefox
   .on("click", () => {});
 
   // A <g> group element that all map paths are drawn into.
@@ -778,21 +847,20 @@
 
   //  Define the zoom functionality.
 	const zoom = d3.zoom()
-	  .scaleExtent([1, 40])
+	  .scaleExtent([1, 150])
 	  .on("zoom", ({ transform }) => {
 		mapGroup.attr("transform", transform);
-		// Force all browsers to re-rasterise the paths on every zoom tick
-		// rather than stretching a cached bitmap. The offsetHeight read
-		// triggers a synchronous layout/reflow which flushes the render cache.
-		mapGroup.selectAll("path.cd-region").attr("transform", "translate(0,0)");
 	  });
 	svg.call(zoom);
 
   //  When provided a feature (i.e. a census division is pressed), calculate and provide the map position to zoom into.
 	function zoomToFeature(feature) {
+    // On mobile, skip programmatic zoom-in — the detail sheet slides up without
+    // moving the map backdrop, avoiding disorienting zoom into remote corridors.
+    if (isMobile()) return;
 	  const [[x0, y0], [x1, y1]] = path.bounds(feature);
 	  const dx = x1 - x0; const dy = y1 - y0;
-	  const scale = Math.min(40, 0.95 / Math.max(dx / WIDTH, dy / HEIGHT));
+	  const scale = Math.min(150, 0.45 / Math.max(dx / WIDTH, dy / HEIGHT));
 	  const translate = [WIDTH / 2 - scale * ((x0 + x1) / 2), HEIGHT / 2 - scale * ((y0 + y1) / 2)];
 	  svg.transition().duration(750).call(zoom.transform, d3.zoomIdentity.translate(translate[0], translate[1]).scale(scale));
 	}
@@ -977,6 +1045,7 @@
   //       coloured by facility count and wired up for hover/click interactions
   function renderMap() {
     const c = getC();
+    invalidateFilteredValueCache(); // Ensure counts are recomputed for current filter state
     // Get the filtered count for every region; ignore regions with zero matches
     const values = fixedData.features.map(d => getFilteredValue(d)).filter(v => v > 0);
     const minVal = d3.min(values) ?? 0; const maxVal = d3.max(values) ?? 1;
@@ -1000,11 +1069,21 @@
         .attr("stroke-width", 0.5)
         .attr("vector-effect", "non-scaling-stroke") // Keep border width constant regardless of zoom level
 
+        // ── Keyboard accessibility ──
+        // Only regions with data are keyboard-navigable; others are hidden from tab order.
+        .attr("tabindex", d => (getFilteredValue(d) > 0 || hasAnyData(d)) ? "0" : null)
+        .attr("role", d => (getFilteredValue(d) > 0 || hasAnyData(d)) ? "button" : null)
+        .attr("aria-label", d => {
+          const val = getFilteredValue(d);
+          return `${d.properties.CDNAME || "Region"}, ${getTooltipLabel(val)}`;
+        })
+
         // Only show a pointer cursor over regions that have data
         .style("cursor", d => (getFilteredValue(d) > 0 || hasAnyData(d)) ? "pointer" : "default")
 
         // ── Hover interactions (desktop only — mobile uses tap) ──
         .on("mouseover", isMobile() ? null : function(event, d) {
+          state.hoveredFeature = d; // Track for Enter/Space keyboard activation
           // Highlight the border of the hovered region
           d3.select(this).attr("stroke", c.text).attr("stroke-width", 1).raise();
           const hoverVal = getFilteredValue(d);
@@ -1019,7 +1098,29 @@
         // Tooltip follows the mouse as it moves
         .on("mousemove", isMobile() ? null : event => tooltip.style("top", `${event.pageY - 10}px`).style("left", `${event.pageX + 20}px`))
         .on("mouseout", isMobile() ? null : function() {
+          state.hoveredFeature = null; // No longer hovering
           // Restore the border unless this region is the currently selected one (accent2 border)
+          const sel = d3.select(this); if (sel.attr("stroke") !== c.accent2) sel.attr("stroke", c.bg).attr("stroke-width", 0.5);
+          clearLegendMarker();
+          tooltip.style("visibility", "hidden");
+        })
+
+        // ── Keyboard focus: show tooltip at element centre (desktop only) ──
+        .on("focus", isMobile() ? null : function(event, d) {
+          d3.select(this).attr("stroke", c.text).attr("stroke-width", 1).raise();
+          const hoverVal = getFilteredValue(d);
+          updateLegendMarker(hoverVal > 0 ? hoverVal : null, false);
+          const rect = this.getBoundingClientRect();
+          tooltip
+            .style("visibility", "visible")
+            .html(`
+              <div style="color:${c.accent}; font-weight:600; font-size:14px; margin-bottom:4px;">${d.properties.CDNAME}</div>
+              <div style="font-size:11px; color:${c.muted}; font-weight:400;">${getTooltipLabel(hoverVal)}</div>
+            `)
+            .style("top",  `${rect.top  + window.scrollY + rect.height / 2 - 10}px`)
+            .style("left", `${rect.right + window.scrollX + 12}px`);
+        })
+        .on("blur", isMobile() ? null : function() {
           const sel = d3.select(this); if (sel.attr("stroke") !== c.accent2) sel.attr("stroke", c.bg).attr("stroke-width", 0.5);
           clearLegendMarker();
           tooltip.style("visibility", "hidden");
@@ -1048,23 +1149,25 @@
           d3.select(this).style("opacity", 1).attr("stroke", c.accent2).attr("stroke-width", 2).raise();
           
           zoomToFeature(d);       // Animate the map zooming in on the selected region
-          updateSidebarDetail();  // Populate the sidebar with this region's data
 
-          // Scroll the correct container so the census division name is visible near the top.
-          setTimeout(() => {
-            if (isMobile()) {
-              // offsetTop is relative to sidebar (the offset parent), but sidebarInnerContent
-              // is the scroll container — subtract its offsetTop to get the scroll position.
+          updateSidebarDetail();
+
+          if (isMobile()) {
+            // Scroll immediately after layout settles.
+            setTimeout(() => {
               const scrollEl = sidebarInnerContent.node();
               if (scrollEl) {
                 const scrollTop = detailsDiv.node().offsetTop - sidebarInnerContent.node().offsetTop;
                 scrollEl.scrollTo({ top: scrollTop, behavior: "smooth" });
               }
-            } else {
+            }, 50);
+          } else {
+            // Scroll the sidebar so the census division name is visible near the top.
+            setTimeout(() => {
               const scrollEl = sidebar.node();
               if (scrollEl) scrollEl.scrollTo({ top: detailsDiv.node().offsetTop - 16, behavior: "smooth" });
-            }
-          }, 50);
+            }, 50);
+          }
         })
 
         // Animated transition: smoothly update opacity, stroke, and fill whenever
@@ -1162,14 +1265,14 @@
     const TECH_KEYS = {
       "V_414": "Personal Goods Wholesalers",
       "V_416": "Building Material Wholesalers", "V_417": "Machinery & Equipment Wholesalers",
-      "V_418": "Miscellaneous Wholesalers", "V_488": "Support Activities for Transport",
-      "V_517": "Telecommunications Services", "V_518": "Data Processing & Hosting",
+      "V_418": "Miscellaneous Wholesalers", "V_488": "Support Activities for Transportation",
+      "V_517": "Telecommunications Services", "V_518": "Data Processing, Hosting, & Related Services",
       "V_541": "Professional, Scientific & Technical Services", "V_561": "Administrative & Support Services",
       "V_611": "Educational Services", "V_811": "Repair & Maintenance Services"
     };
 
     const MRO_KEYS = {
-      "I_336": "Transportation Equipment", "I_488": "Transport Support Systems", "I_811": "Heavy Repair & Maintenance"
+      "I_336": "Transportation Equipment", "I_488": "Transportation Support Activities", "I_811": "Heavy Repair & Maintenance"
     };
 
     // For each operation type, count how many matching local facilities fall into
@@ -1317,6 +1420,13 @@
     //  Hovering a slice updates the centre label to show that industry's count.
     const SIZE = 260; const RADIUS = SIZE / 2; const INNER = RADIUS * 0.55;
     const svgD = d3.select("#donut-chart").append("svg").attr("width", SIZE).attr("height", SIZE + 20).style("overflow", "visible");
+    // On mobile, block all pointer events on the donut for 450ms — this absorbs the
+    // synthesized ghost mouseover/click the browser fires after a touchend at the
+    // same screen coordinates as the map tap that opened this panel.
+    if (isMobile()) {
+      svgD.style("pointer-events", "none");
+      setTimeout(() => svgD.style("pointer-events", null), 450);
+    }
     // Centre group — all paths and labels are relative to the donut's centre
     const g = svgD.append("g").attr("transform", `translate(${RADIUS},${RADIUS})`);
     
@@ -1333,24 +1443,24 @@
 
     // Draw the donut slices. d3.pie() converts value counts to arc angles.
     let _activeTouchSlice = null;
-    g.selectAll("path").data(d3.pie().value(d => d.value).sort(null)(industryData)).join("path").attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)).attr("fill", d => INDUSTRY_COLOURS[d.data.label]).attr("stroke", c.bg).attr("stroke-width", 2).style("cursor", "pointer").style("transition", "d 0.15s ease")
+    g.selectAll("path").data(d3.pie().value(d => d.value).sort(null)(industryData)).join("path").attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)).attr("fill", d => INDUSTRY_COLOURS[d.data.label]).attr("stroke", c.bg).attr("stroke-width", 2).style("cursor", "pointer")
       // On hover: expand the slice outward and show its sector name/count in the centre
-      .on("mouseover", function(_, d) { d3.select(this).attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS + 6)(d)); cVal.text(d.data.value); cLab.text(d.data.label.toUpperCase()); })
+      .on("mouseover", function(_, d) { d3.select(this).transition().duration(150).attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS + 6)(d)); cVal.text(d.data.value); cLab.text(d.data.label.toUpperCase()); })
       // On mouse-out: shrink the slice back and restore the default centre label
-      .on("mouseout", function(_, d) { d3.select(this).attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)(d)); showDefault(); })
+      .on("mouseout", function(_, d) { d3.select(this).transition().duration(150).attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)(d)); showDefault(); })
       // Touch: tap to expand and show label; tap again or tap another to collapse
       .on("touchstart", function(event, d) {
         event.stopPropagation();
         const self = d3.select(this);
         if (_activeTouchSlice && _activeTouchSlice.node() !== this) {
-          _activeTouchSlice.attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)(_activeTouchSlice.datum()));
+          _activeTouchSlice.transition().duration(150).attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)(_activeTouchSlice.datum()));
         }
         if (_activeTouchSlice && _activeTouchSlice.node() === this) {
-          self.attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)(d));
+          self.transition().duration(150).attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)(d));
           showDefault();
           _activeTouchSlice = null;
         } else {
-          self.attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS + 6)(d));
+          self.transition().duration(150).attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS + 6)(d));
           cVal.text(d.data.value);
           cLab.text(d.data.label.toUpperCase());
           _activeTouchSlice = self;
@@ -1449,10 +1559,8 @@
       .style("padding", "4px 9px")
       .style("border-radius", "4px")
       .style("transition", "all 0.2s ease")
-      .on("click", () => {
-        state.currentAnalyticsKeys.clear(); // Remove all active operations filters
-        applyFilterAndCheckZoom();
-      })
+      .on("touchend", (event) => { event.preventDefault(); state.currentAnalyticsKeys.clear(); applyFilterAndCheckZoom(); })
+      .on("click", (event) => { if (event.pointerType === "touch") return; state.currentAnalyticsKeys.clear(); applyFilterAndCheckZoom(); })
       .on("mouseenter", function() {
         if (state.currentAnalyticsKeys.size > 0) d3.select(this).style("background", state.isDark ? "rgba(78,204,163,0.12)" : "rgba(0,169,79,0.08)");
       })
@@ -1482,9 +1590,16 @@
         .style("padding", isMobile() ? "8px 14px" : "5px 10px")
         .style("border-radius", "20px")
         .style("cursor", "pointer")
-        .on("click", function() {
+        .on("touchend", function(event) {
+          event.preventDefault();
           const k = this.getAttribute("data-ops-key");
-          // Toggle: if already selected, deselect; otherwise select
+          if (state.currentAnalyticsKeys.has(k)) state.currentAnalyticsKeys.delete(k);
+          else state.currentAnalyticsKeys.add(k);
+          applyFilterAndCheckZoom();
+        })
+        .on("click", function(event) {
+          if (event.pointerType === "touch") return;
+          const k = this.getAttribute("data-ops-key");
           if (state.currentAnalyticsKeys.has(k)) state.currentAnalyticsKeys.delete(k);
           else state.currentAnalyticsKeys.add(k);
           applyFilterAndCheckZoom();
@@ -1536,7 +1651,13 @@
         .style("cursor", "pointer")
         .style("letter-spacing", "0.5px")
         .style("transition", "all 0.15s ease")
-        .on("click", function() {
+        .on("touchend", function(event) {
+          event.preventDefault();
+          state.industryFilterMode = this.getAttribute("data-mode");
+          applyFilterAndCheckZoom();
+        })
+        .on("click", function(event) {
+          if (event.pointerType === "touch") return;
           state.industryFilterMode = this.getAttribute("data-mode");
           applyFilterAndCheckZoom();
         });
@@ -1552,10 +1673,8 @@
       .style("padding", "4px 9px")
       .style("border-radius", "4px")
       .style("transition", "all 0.2s ease")
-      .on("click", () => {
-        state.currentIndustries.clear(); // Remove all industry filters
-        applyFilterAndCheckZoom();
-      })
+      .on("touchend", (event) => { event.preventDefault(); state.currentIndustries.clear(); applyFilterAndCheckZoom(); })
+      .on("click", (event) => { if (event.pointerType === "touch") return; state.currentIndustries.clear(); applyFilterAndCheckZoom(); })
       .on("mouseenter", function() {
         if (state.currentIndustries.size > 0) d3.select(this).style("background", state.isDark ? "rgba(78,204,163,0.12)" : "rgba(0,169,79,0.08)");
       })
@@ -1583,7 +1702,17 @@
         .style("padding", isMobile() ? "8px 14px" : "5px 10px")
         .style("border-radius", "20px")
         .style("cursor", "pointer")
-        .on("click", function() {
+        .on("touchend", function(event) {
+          event.preventDefault();
+          const k = this.getAttribute("data-ind-key");
+          const cur = state.currentIndustries.get(k);
+          if (!cur)                  state.currentIndustries.set(k, "include");
+          else if (cur === "include") state.currentIndustries.set(k, "exclude");
+          else                       state.currentIndustries.delete(k);
+          applyFilterAndCheckZoom();
+        })
+        .on("click", function(event) {
+          if (event.pointerType === "touch") return;
           const k = this.getAttribute("data-ind-key");
           const cur = state.currentIndustries.get(k);
           // Cycle: not set → include → exclude → remove
@@ -1627,7 +1756,8 @@
       .style("border-radius", "4px")
       .style("transition", "all 0.2s ease")
       .style("letter-spacing", "0.8px")
-      .on("click", clearAllFilters)
+      .on("touchend", (event) => { event.preventDefault(); clearAllFilters(); })
+      .on("click", (event) => { if (event.pointerType === "touch") return; clearAllFilters(); })
       .on("mouseenter", function() {
         const either = state.currentAnalyticsKeys.size > 0 || state.currentIndustries.size > 0;
         if (either) d3.select(this).style("background", state.isDark ? "rgba(78,204,163,0.12)" : "rgba(0,169,79,0.08)");
@@ -1662,10 +1792,8 @@
       .style("padding", "4px 8px")
       .style("border-radius", "4px")
       .style("font-family", "'Inter', sans-serif")
-      .on("click", () => {
-        state.infoOpen = false;
-        infoSidebar.style("transform", "translateX(100%)"); // Slide the panel off-screen
-      });
+      .on("touchend", (event) => { event.preventDefault(); state.infoOpen = false; infoSidebar.style("transform", "translateX(100%)"); })
+      .on("click", (event) => { if (event.pointerType === "touch") return; state.infoOpen = false; infoSidebar.style("transform", "translateX(100%)"); });
 
     infoModal.append("h3")
       .style("font-size", "20px")
@@ -1895,6 +2023,7 @@
     renderMap();
     refreshControlsState();
     if (state.selectedFeature) updateSidebarDetail();
+    announceFilterUpdate();
   }
   
   // Re-renders the map and refreshes filter chips after any filter change.
@@ -1903,6 +2032,7 @@
     renderMap();
     refreshControlsState();
     if (state.selectedFeature) updateSidebarDetail();
+    announceFilterUpdate();
   }
 
   // ─── SECTION 19: MAP APPEARANCE RESTORE ──────────────────────────────────
@@ -1966,11 +2096,32 @@
     });
   }
 
-  // ─── SECTION 21: KEYBOARD SHORTCUT ───────────────────────────────────────
-  // Pressing Escape while a region is selected deselects it and zooms out.
+  // ─── SECTION 21: KEYBOARD SHORTCUTS ──────────────────────────────────────
+  // Escape: deselect the active region (mirrors the ✕ / Close button).
+  //         Does NOT zoom out — use the ⌂ Home button to reset the view.
+  // Enter / Space: when hovering a region with the mouse, activate it as if clicked.
   window.addEventListener("keydown", (event) => {
-    if ((event.key === "Escape" || event.key === "Esc") && state.selectedFeature) {
-      resetView();
+    if (event.key === "Escape" || event.key === "Esc") {
+      if (state.selectedFeature) restoreMapAppearance();
+      return;
+    }
+    if (event.key === "Enter" || event.key === " ") {
+      const d = state.hoveredFeature;
+      if (!d) return;
+      event.preventDefault();
+      if (!hasAnyData(d)) { restoreMapAppearance(); return; }
+      state.selectedFeature = d;
+      const selVal = getFilteredValue(d);
+      updateLegendMarker(selVal > 0 ? selVal : null, true);
+      if (!state.sidebarOpen) { state.sidebarOpen = true; updateSidebarToggle(); }
+      mapGroup.selectAll("path.cd-region").style("opacity", 0.35).attr("stroke", getC().bg);
+      // Highlight the hovered path element directly
+      mapGroup.selectAll("path.cd-region")
+        .filter(p => p === d)
+        .style("opacity", 1).attr("stroke", getC().accent2).attr("stroke-width", 2).raise();
+      zoomToFeature(d);
+      updateSidebarDetail();
+      tooltip.style("visibility", "hidden");
     }
   });
 
