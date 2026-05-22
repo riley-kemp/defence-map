@@ -12,7 +12,7 @@
 
   // Downloads the GeoJSON file that contains the shape of every Census Division
   async function fetchGeoData() {
-    const url = "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/data/Canada_CD.json";
+    const url = "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/data/Canada_CD.geojson";
     const response = await fetch(url);
     // If the download fails, throw a descriptive error rather than silently continuing
     if (!response.ok) throw new Error(`Failed to fetch GeoJSON: ${response.statusText}`);
@@ -124,7 +124,7 @@
   }
   
   // Apply the winding fix to every region in the GeoJSON dataset.
-  const fixedData = { ...rawGeo, features: rawGeo.features.map(fixWinding) };
+  const fixedData = rawGeo;
 
   // ─── SECTION 5: APPLICATION STATE ────────────────────────────────────────
   //  A single `state` object holds everything that can change while the user
@@ -838,10 +838,8 @@
   // ─── SECTION 10: MAP PROJECTION & ZOOM ───────────────────────────────────
   //  A "projection" converts latitude/longitude coordinates from the GeoJSON
   //  into x/y pixel positions on the SVG canvas.
-	const projection = d3.geoConicConformal()
-	  .parallels([49, 77])
-	  .rotate([96, 0])
-	  .center([0, 60])
+	const projection = d3.geoIdentity()
+	  .reflectY(true) // GIS systems have Y going up, SVGs have Y going down
 	  .fitExtent([[10, 20], [WIDTH - 10, HEIGHT - 110]], fixedData);
 	const path = d3.geoPath().projection(projection);
 
@@ -1081,15 +1079,17 @@
         // Only show a pointer cursor over regions that have data
         .style("cursor", d => (getFilteredValue(d) > 0 || hasAnyData(d)) ? "pointer" : "default")
 
-        // ── Hover interactions (desktop only — mobile uses tap) ──
+	// ── Hover interactions (desktop only — mobile uses tap) ──
         .on("mouseover", isMobile() ? null : function(event, d) {
-          state.hoveredFeature = d; // Track for Enter/Space keyboard activation
-          // Highlight the border of the hovered region
+          state.hoveredFeature = d;
+          if (state._hoveredEl && state._hoveredEl !== this) {
+            const prev = d3.select(state._hoveredEl);
+            if (prev.attr("stroke") !== c.accent2) prev.attr("stroke", c.bg).attr("stroke-width", 0.5);
+          }
+          state._hoveredEl = this;
           d3.select(this).attr("stroke", c.text).attr("stroke-width", 1).raise();
           const hoverVal = getFilteredValue(d);
-          // Move the legend marker to this region's value (or hide it if zero)
           updateLegendMarker(hoverVal > 0 ? hoverVal : null, false);
-          // Show the tooltip with the region name and facility count
           tooltip.style("visibility", "visible").html(`
             <div style="color:${c.accent}; font-weight:600; font-size:14px; margin-bottom:4px;">${d.properties.CDNAME}</div>
             <div style="font-size:11px; color:${c.muted}; font-weight:400;">${getTooltipLabel(getFilteredValue(d))}</div>
@@ -1097,10 +1097,11 @@
         })
         // Tooltip follows the mouse as it moves
         .on("mousemove", isMobile() ? null : event => tooltip.style("top", `${event.pageY - 10}px`).style("left", `${event.pageX + 20}px`))
-        .on("mouseout", isMobile() ? null : function() {
-          state.hoveredFeature = null; // No longer hovering
-          // Restore the border unless this region is the currently selected one (accent2 border)
-          const sel = d3.select(this); if (sel.attr("stroke") !== c.accent2) sel.attr("stroke", c.bg).attr("stroke-width", 0.5);
+        .on("mouseleave", isMobile() ? null : function() {
+          state.hoveredFeature = null;
+          state._hoveredEl = null;
+          const sel = d3.select(this);
+          if (sel.attr("stroke") !== c.accent2) sel.attr("stroke", c.bg).attr("stroke-width", 0.5);
           clearLegendMarker();
           tooltip.style("visibility", "hidden");
         })
@@ -1443,7 +1444,7 @@
 
     // Draw the donut slices. d3.pie() converts value counts to arc angles.
     let _activeTouchSlice = null;
-    g.selectAll("path").data(d3.pie().value(d => d.value).sort(null)(industryData)).join("path").attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)).attr("fill", d => INDUSTRY_COLOURS[d.data.label]).attr("stroke", c.bg).attr("stroke-width", 2).style("cursor", "pointer")
+    g.selectAll("path").data(d3.pie().value(d => d.value).sort(null)(industryData)).join("path").attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)).attr("fill", d => INDUSTRY_COLOURS[d.data.label]).attr("stroke", c.bg).attr("stroke-width", 2).style("cursor", "pointer").style("-webkit-tap-highlight-color", "transparent")
       // On hover: expand the slice outward and show its sector name/count in the centre
       .on("mouseover", function(_, d) { d3.select(this).transition().duration(150).attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS + 6)(d)); cVal.text(d.data.value); cLab.text(d.data.label.toUpperCase()); })
       // On mouse-out: shrink the slice back and restore the default centre label
@@ -1451,6 +1452,7 @@
       // Touch: tap to expand and show label; tap again or tap another to collapse
       .on("touchstart", function(event, d) {
         event.stopPropagation();
+        event.preventDefault();
         const self = d3.select(this);
         if (_activeTouchSlice && _activeTouchSlice.node() !== this) {
           _activeTouchSlice.transition().duration(150).attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)(_activeTouchSlice.datum()));
@@ -1465,7 +1467,7 @@
           cLab.text(d.data.label.toUpperCase());
           _activeTouchSlice = self;
         }
-      }, { passive: true });
+      });
 
     // Chart title below the donut
     svgD.append("text").attr("transform", `translate(0, ${SIZE + 20})`).style("font-size", "11px").style("font-weight", "600").style("letter-spacing", "1px").style("fill", c.muted).style("font-family", "Inter").text("DEFENCE INDUSTRIES SERVED");
