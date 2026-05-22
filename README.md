@@ -8,7 +8,7 @@ The data presented here represents the full depth of the facility data collected
 
 ## Map Data
 - [defence_facilities.csv](data/defence_facilities.csv) - is a lookup table mapping facility-level metrics to Canadian census divisions. Facilities were included based on their association to the defence industry, including facility certifications, news reports, union websites, and the websites of the companies themselves. Could this data have been collated and aggregated in a more efficient manner, definitely. Does it work as currently formatted and I'm too afraid to change it at this point, absolutely!
-- [Canada_CD.json](data/Canada_CD.json) - is spatial data of Canada, divided into census divisions. This data is based off the [2025 Statistics Canada Census Subdivision Boundary File.](https://www12.statcan.gc.ca/census-recensement/2011/geo/bound-limit/bound-limit-s-eng.cfm?year=25) and was aggregated by "CDUID".
+- [Canada_CD.geojson](data/Canada_CD.geojson) - is a GeoJSON spatial data of Canada, divided into census divisions. This data is based off the [2025 Statistics Canada Census Subdivision Boundary File.](https://www12.statcan.gc.ca/census-recensement/2011/geo/bound-limit/bound-limit-s-eng.cfm?year=25) and was aggregated by "CDUID".
 
 ## Map
 Can be found [here.](https://riley-kemp.github.io/defence-map/)
