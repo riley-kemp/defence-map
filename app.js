@@ -81,16 +81,24 @@
   // Converts boolean csv values.
   const isTrue = (val) => val && (val.toString().toLowerCase() === "true" || val.toString() === "1");
 
+  // Assign a power-of-two bit to each industry key so filter checks can use
+  // bitwise AND instead of iterating through a Set on every facility.
+  // e.g. Aircraft=1, CnISR=2, Land Sys=4, Marine=8 …
+  const INDUSTRY_BITS = Object.fromEntries(
+    Object.keys(INDUSTRY_KEYS).map((k, i) => [k, 1 << i])
+  );
+
   // Transform every row in the CSV into a structured facility object.
   // Each object stores:
-  //   - id        : a unique index number
-  //   - cduid     : the Census Division ID — links this facility to a map region
-  //   - isMfg     : is this a defence manufacturing facility
-  //   - isTech    : is this a value-add / defence technology facility
-  //   - isMro     : is this a defence maintenance, repair, and overhaul facility
-  //   - isDefence : is this a general facility count
-  //   - industries: the set of defence industry sectors it belongs to
-  //   - rawRow    : the original CSV row (kept for sub-category drill-downs)
+  //   - id          : a unique index number
+  //   - cduid       : the Census Division ID — links this facility to a map region
+  //   - isMfg       : is this a defence manufacturing facility
+  //   - isTech      : is this a value-add / defence technology facility
+  //   - isMro       : is this a defence maintenance, repair, and overhaul facility
+  //   - isDefence   : is this a general facility count
+  //   - industryMask: bitmask of defence industry sectors (replaces Set for fast filtering)
+  //   - industries  : Set of industry keys (still used for donut chart data)
+  //   - rawRow      : the original CSV row (kept for sub-category drill-downs)
   const allFacilities = rawCsv.map((row, index) => {
     const facility = {
       id: index,
@@ -99,13 +107,17 @@
       isTech: isTrue(row["Value-Add"]),
       isMro: isTrue(row["MRO/ISS"]),
       isDefence: isTrue(row.General),
+      industryMask: 0,
       industries: new Set(),
       rawRow: row
     };
 
-    // Check each industry column and add it to the facility's industry set
+    // Check each industry column, populate both the Set (for chart data) and the bitmask (for filtering)
     Object.keys(INDUSTRY_KEYS).forEach(ind => {
-      if (isTrue(row[ind])) facility.industries.add(ind);
+      if (isTrue(row[ind])) {
+        facility.industries.add(ind);
+        facility.industryMask |= INDUSTRY_BITS[ind];
+      }
     });
     return facility;
   });
@@ -158,6 +170,7 @@
     hoveredFeature: null,              // The GeoJSON feature currently under the mouse cursor (desktop)
     infoOpen: false,                   // Whether the "About this map" info panel is visible
     sidebarOpen: true,                 // Whether the left filter & census division information sidebar is expanded
+    isPanning: false,                  // Whether the user is actively panning/dragging the map
     legendMin: 0,                      // Lowest facility count currently shown in the legend
     legendMax: 1,                      // Highest facility count currently shown in the legend
     legendColourScale: null,           // The D3 colour-scale function currently in use
@@ -206,12 +219,17 @@
   function buildFilterPredicate() {
     const analyticsActive  = state.currentAnalyticsKeys.size > 0;
     const industriesActive = state.currentIndustries.size > 0;
-    const includes = industriesActive
-      ? [...state.currentIndustries.entries()].filter(([, s]) => s === "include").map(([ind]) => ind)
-      : [];
-    const excludes = industriesActive
-      ? [...state.currentIndustries.entries()].filter(([, s]) => s === "exclude").map(([ind]) => ind)
-      : [];
+
+    // Build include/exclude bitmasks once per render pass — replaces per-facility
+    // Set.has() iteration with a pair of fast bitwise AND operations.
+    let includeMask = 0;
+    let excludeMask = 0;
+    if (industriesActive) {
+      for (const [ind, status] of state.currentIndustries) {
+        if (status === "include") includeMask |= (INDUSTRY_BITS[ind] ?? 0);
+        if (status === "exclude") excludeMask |= (INDUSTRY_BITS[ind] ?? 0);
+      }
+    }
     const mode = state.industryFilterMode;
 
     return function facilityPassesFilters(f) {
@@ -225,11 +243,13 @@
       }
 
       if (industriesActive) {
-        if (excludes.some(ind => f.industries.has(ind))) return false;
-        if (includes.length > 0) {
+        // Exclude check: any excluded industry bit set on this facility → reject
+        if (excludeMask && (f.industryMask & excludeMask)) return false;
+        // Include check: bitwise AND/OR against includeMask
+        if (includeMask) {
           const passes = mode === "and"
-            ? includes.every(ind => f.industries.has(ind))
-            : includes.some(ind => f.industries.has(ind));
+            ? (f.industryMask & includeMask) === includeMask  // all bits must match
+            : (f.industryMask & includeMask) !== 0;           // any bit must match
           if (!passes) return false;
         }
       }
@@ -408,6 +428,96 @@
   `;
   document.head.appendChild(btnTooltipStyle);
 
+  // ── CSS custom-property theme tokens ──────────────────────────────────────
+  // Injected once at startup.  All static chrome (sidebar, buttons, tooltip,
+  // legend overlay, info panel) reads these variables via CSS rules rather than
+  // receiving inline-style mutations on every theme change.  The only values
+  // that still need to be written programmatically are the ones D3 must set
+  // based on data (choropleth fill, selected-region stroke, etc.) — those
+  // continue to use getC() as before.
+  const themeStyleEl = document.createElement("style");
+  themeStyleEl.id = "theme-vars";
+  themeStyleEl.textContent = `
+    :root {
+      --bg:           #f8f9fa;
+      --surface:      #ffffff;
+      --border:       rgba(0,0,0,0.08);
+      --text:         #1a1a1a;
+      --muted:        #717171;
+      --accent:       #00a94f;
+      --accent2:      #d97706;
+      --no-data:      #adb1ba;
+      --no-data-none: #e0e2e6;
+      --shadow-sm:    0 10px 30px rgba(0,0,0,0.1);
+      --legend-bg:    rgba(255,255,255,0.9);
+    }
+    body.dark {
+      background-color: #0e1117;
+      --bg:           #0e1117;
+      --surface:      #161b24;
+      --border:       rgba(255,255,255,0.1);
+      --text:         #e8eaf0;
+      --muted:        #6b7280;
+      --accent2:      #f0a500;
+      --no-data:      #2a3040;
+      --no-data-none: #191d25;
+      --shadow-sm:    0 10px 30px rgba(0,0,0,0.5);
+      --legend-bg:    rgba(22,27,36,0.8);
+    }
+
+    /* ── Chrome elements wired to tokens ── */
+    body {
+      background-color: #f8f9fa; /* ensures removing body.dark fully resets the background */
+    }
+    #map-container {
+      background: var(--bg);
+      color: var(--text);
+      transition: background 0.3s ease;
+    }
+    /* Sidebar */
+    #map-container > div > div:first-child {
+      background: var(--surface);
+      transition: background 0.3s ease, border 0.3s ease;
+    }
+    /* Control panel buttons */
+    #control-panel button {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      transition: background 0.15s ease, color 0.15s ease, border 0.15s ease, transform 0.2s ease;
+    }
+    #control-panel button:hover {
+      border-color: var(--accent);
+      transform: scale(1.08);
+    }
+    /* Tooltip — appended to <body>, so selector must not be scoped to #map-container */
+    .map-tooltip {
+      background: var(--surface);
+      color: var(--text);
+      border: 1px solid var(--border);
+      box-shadow: var(--shadow-sm);
+    }
+    /* Legend overlay */
+    .legend-overlay {
+      background: var(--legend-bg);
+      border: 1px solid var(--border);
+      transition: background 0.3s ease, border 0.3s ease;
+    }
+    /* Info sidebar */
+    .info-sidebar {
+      background: var(--surface);
+      border-left: 1px solid var(--border);
+      transition: background 0.3s ease, border 0.3s ease;
+    }
+  `;
+  document.head.appendChild(themeStyleEl);
+
+  // Helper: reads a CSS custom property value from :root (used when D3 needs
+  // a token value for data-driven attributes such as stroke colours).
+  function getCSSVar(name) {
+    return getComputedStyle(document.documentElement).getPropertyValue(name).trim();
+  }
+
   // ── Accessibility: live region for screen-reader filter announcements ──
   // Updated whenever filters change so screen readers announce the new state.
   const a11yAnnouncer = document.createElement("div");
@@ -478,16 +588,16 @@
   // flashBtn: immediately paints the button accent, then restores after 220 ms.
   // Pass skipRestore=true when the caller's updateUI/renderMap will repaint the
   // button — otherwise the setTimeout would restore stale pre-theme-flip colours.
-  function flashBtn(btn, skipRestore = false) {
+  function flashBtn(btn) {
     const c = getC();
     btn.style("background", c.accent).style("color", "#fff").style("border", `1px solid ${c.accent}`);
-    if (!skipRestore) {
-      setTimeout(() => {
-        // Re-read colours at restore time so we always use the current theme
-        const cr = getC();
-        btn.style("background", cr.surface).style("color", cr.text).style("border", `1px solid ${cr.border}`);
-      }, 220);
-    }
+    // Always clear the inline styles after the flash so the CSS rule (var(--surface) etc.)
+    // takes back control. Previously, skipRestore=true was passed by the theme toggle
+    // expecting updateUI() to repaint the button — but updateUI() no longer writes
+    // inline styles to #control-panel buttons, so the green would stick permanently.
+    setTimeout(() => {
+      btn.style("background", null).style("color", null).style("border", null);
+    }, 220);
   }
 
   // Helper: creates a styled control button and appends it to the panel
@@ -517,8 +627,12 @@
   // "☾" / "☼" — toggles between dark mode and light mode
   const themeToggle = makeBtn("☾", "Toggle light / dark mode");
   onTap(themeToggle, function() {
-    flashBtn(d3.select(this), true);
+    flashBtn(d3.select(this));
     state.isDark = !state.isDark;
+    // One classList toggle flips all CSS-variable-driven chrome in one paint.
+    // updateUI still runs to handle mobile pill / collapseBtn / legend colours
+    // and to rebuild any controls that depend on getC().
+    document.body.classList.toggle("dark", state.isDark);
     updateUI();
     renderMap();
   });
@@ -730,6 +844,8 @@
   } else {
     // Desktop: small circular button positioned at the right edge of the sidebar.
     // Shows ◀ when open (click to collapse) and ▶ when closed (click to expand).
+    // Colours are set explicitly here and kept in sync by updateUI() — this button
+    // sits outside #control-panel so the shared CSS rule doesn't reach it.
     collapseBtn = mainWrapper.append("button")
       .style("position", "absolute")
       .style("top", "24px")
@@ -763,6 +879,7 @@
   // The "About" info panel — slides in from the right edge of the screen.
   // Triggered by the ⓘ button in the control panel.
   const infoSidebar = container.append("div")
+    .attr("class", "info-sidebar")
     .style("position", "absolute")
     .style("top", "0")
     .style("right", "0")
@@ -773,7 +890,7 @@
     .style("z-index", "200")
     .style("box-shadow", "-4px 0 20px rgba(0,0,0,0.15)")
     .style("transform", "translateX(100%)")           // starts off-screen to the right
-    .style("transition", "transform 0.4s ease, background 0.3s ease, border 0.3s ease")
+    .style("transition", "transform 0.4s ease")       // background/border handled by CSS tokens
     .style("box-sizing", "border-box");
   
   // Alias for clarity — infoSidebar and infoModal are the same element
@@ -781,7 +898,9 @@
 
   // The hover tooltip that follows the mouse cursor over map regions.
   // Initially hidden; shown on mouseover events in renderMap().
+  // Colours are applied via the .map-tooltip CSS rule (theme tokens).
   const tooltip = d3.select("body").append("div")
+    .attr("class", "map-tooltip")
     .style("position", "absolute")
     .style("visibility", "hidden")
     .style("padding", "10px 14px")
@@ -832,7 +951,13 @@
   // A <g> group element that all map paths are drawn into.
   // D3 zoom transforms are applied to this group rather than the whole SVG,
   // so the buttons and legend (outside this group) stay fixed in place.
-  const mapGroup = svg.append("g"); 
+  const mapGroup = svg.append("g");
+
+  // Cached D3 selection of all Census Division <path> elements.
+  // Assigned inside renderMap() after the .join() call and reused everywhere
+  // else that previously called mapGroup.selectAll("path.cd-region") directly —
+  // avoiding redundant DOM queries on every interaction.
+  let cdPaths = mapGroup.selectAll("path.cd-region"); // empty selection before first render
 
   // The legend overlay box (bottom-right on desktop, top-left on mobile).
   // Shows the colour scale and swatch key for the choropleth.
@@ -840,6 +965,7 @@
   // Mobile legend height = 3 buttons × 44px + 2 gaps × 6px, same in both portrait and landscape
   const _legendH = isMobile() ? "144px" : null;
   const legendOverlay = mapContainer.append("div")
+    .attr("class", "legend-overlay")
     .style("position", "absolute")
     .style("bottom", isMobile() ? null : "30px")
     .style("top",    isMobile() ? "max(12px, env(safe-area-inset-top, 12px))" : null)
@@ -852,8 +978,7 @@
     .style("min-width", isMobile() ? null : "260px")
     .style("max-width", isMobile() ? "calc(100vw - 80px)" : null)
     .style("box-sizing", "border-box")
-    .style("overflow", "hidden")
-    .style("transition", "all 0.3s ease");
+    .style("overflow", "hidden");
 
   // ─── SECTION 9: COLOUR THEMES ─────────────────────────────────────────────
   //  Each theme is a D3 colour interpolation function — given a number between
@@ -878,9 +1003,28 @@
   //  Define the zoom functionality.
 	const zoom = d3.zoom()
 	  .scaleExtent([1, 150])
-	  .on("zoom", ({ transform }) => {
+	  .on("start", (event) => {
+      // Only flag as panning for genuine user interactions, not programmatic transitions.
+      // event.sourceEvent is null for zoomToFeature / zoomToFull calls.
+      if (!isMobile() && event.sourceEvent) {
+        state.isPanning = true;
+        tooltip.style("visibility", "hidden");
+      }
+    })
+	  .on("zoom", ({ transform, sourceEvent }) => {
 		mapGroup.attr("transform", transform);
-	  });
+      // Hide the tooltip on every user-driven pan/zoom frame.
+      // Doing this here (not just in "start") ensures it stays hidden even if
+      // a mouseover on a path fires between mousedown and the first drag movement.
+      if (!isMobile() && sourceEvent) {
+        tooltip.style("visibility", "hidden");
+      }
+	  })
+    .on("end", (event) => {
+      if (!isMobile() && event.sourceEvent) {
+        state.isPanning = false;
+      }
+    });
 	svg.call(zoom);
 
   //  When provided a feature (i.e. a census division is pressed), calculate and provide the map position to zoom into.
@@ -942,73 +1086,177 @@
 
   // Draws the colour gradient legend bar with min/max labels, theme switcher
   // buttons, and a movable marker line that tracks the hovered/selected region.
+  //
+  // Performance note: on the first call this builds the skeleton DOM once.
+  // On every subsequent call (theme change, filter change) it updates only the
+  // *properties* that actually changed — colour stops, label text, button styles —
+  // without destroying and recreating any nodes. This eliminates the full DOM
+  // teardown that the old `legendOverlay.selectAll("*").remove()` triggered,
+  // cutting GC pressure and avoiding a browser layout recalculation per update.
   function updateLegend(min, max, colourScale) {
     const c = getC();
-    // On mobile the legend box is smaller, so calculate a narrower bar width
     const BAR_WIDTH = isMobile()
       ? Math.max(80, Math.min(280, window.innerWidth - 80 - 24))
       : 280;
     const BAR_HEIGHT = 4;
-
-    legendOverlay.selectAll("*").remove(); // Clear any previous legend content
-
-    legendOverlay.append("div").style("font-size", "10px").style("font-weight", "600").style("letter-spacing", "1.2px").style("margin-bottom", isMobile() ? "6px" : "12px").style("color", c.muted).text("DEFENCE FACILITY COUNT");
-
-    // Create an SVG inside the legend for the gradient bar
-    const svgL = legendOverlay.append("svg").attr("id", "legend-bar-svg").attr("width", BAR_WIDTH).attr("height", 38).style("display", "block");
-    // Use a stable ID so the browser can reuse the SVG defs across legend rebuilds.
     const gradId = "legend-grad";
-    const grad = svgL.append("defs").append("linearGradient").attr("id", gradId);
-    
-    // Add colour stops at 0%, 50%, and 100% of the value range
-    [0, 0.5, 1].forEach(t => grad.append("stop").attr("offset", `${t * 100}%`).attr("stop-color", colourScale(min + t * (max - min))));
 
-    // Draw the gradient bar rectangle
-    svgL.append("rect").attr("width", BAR_WIDTH).attr("height", BAR_HEIGHT).attr("rx", 2).style("fill", `url(#${gradId})`);
-    // Labels at each end showing the min and max facility counts
-    svgL.append("text").attr("x", 0).attr("y", BAR_HEIGHT + 15).style("font-size", "11px").style("fill", c.text).text(min.toLocaleString());
-    svgL.append("text").attr("x", BAR_WIDTH).attr("y", BAR_HEIGHT + 15).attr("text-anchor", "end").style("font-size", "11px").style("fill", c.text).text(max.toLocaleString());
+    // ── First-call skeleton build ──────────────────────────────────────────
+    // Guard flag stored on the overlay node so we build the skeleton exactly once.
+    // We also clear any leftover content from updateLegendEmpty() before appending,
+    // since that function leaves unkeyed nodes that would stack with the new skeleton.
+    if (!legendOverlay.node()._legendBuilt) {
+      legendOverlay.node()._legendBuilt = true;
+      legendOverlay.selectAll("*").remove(); // clear "no match" state before rebuilding
 
-    // The marker is a vertical line on the gradient bar that moves to show
-    // where the hovered or selected region falls on the colour scale.
-    const markerG = svgL.append("g").attr("id", "legend-marker").style("display", "none");
-    markerG.append("line")
-      .attr("id", "legend-marker-line")
-      .attr("x1", 0).attr("x2", 0)
-      .attr("y1", -4).attr("y2", BAR_HEIGHT + 4)
-      .attr("stroke", "#ffffff")
-      .attr("stroke-width", 2)
-      .attr("stroke-linecap", "round")
-      .style("filter", "drop-shadow(0 0 2px rgba(0,0,0,0.6))");
-    
-    markerG.append("text").attr("id", "legend-marker-label").attr("y", BAR_HEIGHT + 28).attr("text-anchor", "middle").style("font-size", "10px").style("font-weight", "600").style("font-family", "'Inter', sans-serif").style("fill", c.text);
+      // Section heading
+      legendOverlay.append("div")
+        .attr("id", "legend-heading")
+        .style("font-size", "10px")
+        .style("font-weight", "600")
+        .style("letter-spacing", "1.2px")
+        .style("margin-bottom", isMobile() ? "6px" : "12px")
+        .text("DEFENCE FACILITY COUNT");
 
-    // If a region is already selected, immediately show its marker position
+      // SVG bar
+      const svgL = legendOverlay.append("svg")
+        .attr("id", "legend-bar-svg")
+        .attr("width", BAR_WIDTH)
+        .attr("height", 38)
+        .style("display", "block");
+
+      const grad = svgL.append("defs").append("linearGradient").attr("id", gradId);
+      // Three colour-stop placeholders; offsets are fixed, colours are updated below
+      [0, 0.5, 1].forEach((t, i) =>
+        grad.append("stop").attr("class", `legend-stop-${i}`).attr("offset", `${t * 100}%`)
+      );
+
+      svgL.append("rect")
+        .attr("width", BAR_WIDTH).attr("height", BAR_HEIGHT).attr("rx", 2)
+        .style("fill", `url(#${gradId})`);
+
+      svgL.append("text").attr("id", "legend-label-min")
+        .attr("x", 0).attr("y", BAR_HEIGHT + 15)
+        .style("font-size", "11px");
+
+      svgL.append("text").attr("id", "legend-label-max")
+        .attr("x", BAR_WIDTH).attr("y", BAR_HEIGHT + 15)
+        .attr("text-anchor", "end")
+        .style("font-size", "11px");
+
+      // Marker group (hidden until a region is hovered/selected)
+      const markerG = svgL.append("g").attr("id", "legend-marker").style("display", "none");
+      markerG.append("line")
+        .attr("id", "legend-marker-line")
+        .attr("x1", 0).attr("x2", 0)
+        .attr("y1", -4).attr("y2", BAR_HEIGHT + 4)
+        .attr("stroke-width", 2)
+        .attr("stroke-linecap", "round")
+        .style("filter", "drop-shadow(0 0 2px rgba(0,0,0,0.6))");
+      markerG.append("text")
+        .attr("id", "legend-marker-label")
+        .attr("y", BAR_HEIGHT + 28)
+        .attr("text-anchor", "middle")
+        .style("font-size", "10px")
+        .style("font-weight", "600")
+        .style("font-family", "'Inter', sans-serif");
+
+      // Swatch rows
+      const swatchDiv = legendOverlay.append("div")
+        .attr("id", "legend-swatches")
+        .style("margin-top", isMobile() ? "6px" : "12px");
+
+      [
+        { id: "swatch-filter", label: "No defence facilities with the current filters" },
+        { id: "swatch-none",   label: "No defence facilities recorded"                 },
+      ].forEach(({ id, label }) => {
+        const row = swatchDiv.append("div")
+          .style("display", "flex").style("align-items", "flex-start")
+          .style("gap", "8px").style("margin-bottom", isMobile() ? "3px" : "6px");
+        row.append("div")
+          .attr("id", id)
+          .style("width", "16px").style("min-width", "16px").style("height", "10px")
+          .style("margin-top", "2px").style("border-radius", "2px");
+        row.append("span")
+          .style("font-size", "10px").style("color", c.muted)
+          .style("line-height", "1.4").style("word-break", "break-word")
+          .text(label);
+      });
+
+      // Theme switcher button row — use D3 join so buttons persist across renders
+      legendOverlay.append("div")
+        .attr("id", "legend-theme-row")
+        .style("margin-top", isMobile() ? "6px" : "15px")
+        .style("display", "flex")
+        .style("justify-content", "space-between")
+        .style("gap", "4px");
+    }
+
+    // ── Per-render property updates (no node creation) ─────────────────────
+
+    // Heading colour
+    legendOverlay.select("#legend-heading").style("color", c.muted);
+
+    // Gradient colour stops
+    const svgL = legendOverlay.select("#legend-bar-svg");
+    svgL.attr("width", BAR_WIDTH); // update width in case of resize
+    svgL.select("rect").attr("width", BAR_WIDTH);
+    svgL.select("#legend-label-max").attr("x", BAR_WIDTH);
+
+    [0, 0.5, 1].forEach((t, i) =>
+      svgL.select(`.legend-stop-${i}`)
+        .attr("stop-color", colourScale(min + t * (max - min)))
+    );
+
+    // Min / max labels
+    svgL.select("#legend-label-min").style("fill", c.text).text(min.toLocaleString());
+    svgL.select("#legend-label-max").style("fill", c.text).text(max.toLocaleString());
+
+    // Marker label colour
+    svgL.select("#legend-marker-label").style("fill", c.text);
+
+    // Swatch colours
+    legendOverlay.select("#swatch-filter").style("background", c.noData);
+    legendOverlay.select("#swatch-none").style("background", c.noDataNone);
+
+    // Theme buttons — join against the stable key list; buttons are reused, not recreated
+    legendOverlay.select("#legend-theme-row")
+      .selectAll("button")
+      .data(Object.keys(COLOUR_THEMES))
+      .join("button")
+        .text(d => d)
+        .style("flex", "1")
+        .style("background",  d => d === state.currentTheme ? (state.isDark ? "rgba(78,204,163,0.1)" : "rgba(5,150,105,0.1)") : "transparent")
+        .style("color",       d => d === state.currentTheme ? c.accent : c.muted)
+        .style("border",      d => d === state.currentTheme ? `1px solid ${c.accent}` : `1px solid ${c.border}`)
+        .style("padding", "5px 0").style("font-size", "8.5px").style("cursor", "pointer")
+        .style("border-radius", "3px").style("text-transform", "uppercase")
+        .style("font-family", "'Inter', sans-serif").style("transition", "all 0.2s ease")
+        .on("mouseenter", function(_, d) {
+          if (d !== state.currentTheme)
+            d3.select(this).style("border", `1px solid ${c.accent}`).style("transform", "scale(1.08)");
+        })
+        .on("mouseleave", function(_, d) {
+          if (d !== state.currentTheme)
+            d3.select(this).style("border", `1px solid ${c.border}`).style("transform", "scale(1)");
+        })
+        .on("click", (_, d) => { state.currentTheme = d; renderMap(); });
+
+    // Restore marker for the currently-selected region (if any)
     if (state.selectedFeature) {
       const val = getFilteredValue(state.selectedFeature);
       if (val > 0) updateLegendMarker(val, true);
     }
-
-    // Swatch legend: two coloured squares explaining the two "no data" grey shades
-    const swatchDiv = legendOverlay.append("div").style("margin-top", isMobile() ? "6px" : "12px");
-    [{ color: c.noData, label: "No defence facilities with the current filters" }, { color: c.noDataNone, label: "No defence facilities recorded" }].forEach(({ color, label }) => {
-      const row = swatchDiv.append("div").style("display", "flex").style("align-items", "flex-start").style("gap", "8px").style("margin-bottom", isMobile() ? "3px" : "6px");
-      row.append("div").style("width", "16px").style("min-width", "16px").style("height", "10px").style("margin-top", "2px").style("border-radius","2px").style("background", color);
-      row.append("span").style("font-size", "10px").style("color", c.muted).style("line-height", "1.4").style("word-break", "break-word").text(label);
-    });
-
-    // Theme switcher buttons below the gradient bar
-    legendOverlay.append("div").style("margin-top", isMobile() ? "6px" : "15px").style("display", "flex").style("justify-content", "space-between").style("gap", "4px").selectAll("button").data(Object.keys(COLOUR_THEMES)).join("button")
-      .text(d => d).style("flex", "1").style("background", d => d === state.currentTheme ? (state.isDark ? "rgba(78,204,163,0.1)" : "rgba(5,150,105,0.1)") : "transparent").style("color", d => d === state.currentTheme ? c.accent : c.muted).style("border", d => d === state.currentTheme ? `1px solid ${c.accent}` : `1px solid ${c.border}`).style("padding", "5px 0").style("font-size", "8.5px").style("cursor", "pointer").style("border-radius", "3px").style("text-transform", "uppercase").style("font-family", "'Inter', sans-serif").style("transition", "all 0.2s ease")
-      .on("mouseenter", function(_, d) { if (d !== state.currentTheme) d3.select(this).style("border", `1px solid ${c.accent}`).style("transform", "scale(1.08)"); })
-      .on("mouseleave", function(_, d) { if (d !== state.currentTheme) d3.select(this).style("border", `1px solid ${c.border}`).style("transform", "scale(1)"); })
-      .on("click", (_, d) => { state.currentTheme = d; renderMap(); }); // Re-render the whole map with the new colour theme
   }
 
   // Shown when the active filters result in zero matching facilities anywhere.
   // Replaces the normal gradient legend with a simple "no match" message.
+  // We do a full clear here (rare path) and reset the skeleton flag so
+  // updateLegend() rebuilds the gradient DOM the next time it's called.
   function updateLegendEmpty() {
-    const c = getC(); legendOverlay.selectAll("*").remove();
+    const c = getC();
+    legendOverlay.selectAll("*").remove();
+    legendOverlay.node()._legendBuilt = false; // force skeleton rebuild on next updateLegend call
     legendOverlay.append("div").style("font-size", "10px").style("font-weight", "600").style("letter-spacing", "1.2px").style("color", c.muted).text("DEFENCE FACILITY COUNT");
     legendOverlay.append("div").style("font-size", "12px").style("color", c.muted).style("font-style", "italic").style("margin", "12px 0").text("No facilities match current filters.");
     const swatchDiv = legendOverlay.append("div");
@@ -1090,7 +1338,10 @@
 
     // D3 data join: one <path> per Census Division feature.
     // On first call these are created; on subsequent calls they are updated in place.
-    mapGroup.selectAll("path.cd-region")
+    // The result is stored in the module-level cdPaths variable so all other functions
+    // (click handler, restoreMapAppearance, keyboard handler) can reuse it without
+    // issuing a new selectAll("path.cd-region") DOM query.
+    cdPaths = mapGroup.selectAll("path.cd-region")
       .data(fixedData.features)
       .join("path")
         .attr("class", "cd-region")
@@ -1113,6 +1364,7 @@
 
 	// ── Hover interactions (desktop only — mobile uses tap) ──
         .on("mouseover", isMobile() ? null : function(event, d) {
+          if (state.isPanning) return; // suppress tooltip during pan/drag
           state.hoveredFeature = d;
           if (state._hoveredEl && state._hoveredEl !== this) {
             const prev = d3.select(state._hoveredEl);
@@ -1133,6 +1385,7 @@
           // Without this, mousemove fires on every pixel and queues redundant style writes.
           let _rafPending = false;
           return function(event) {
+            if (state.isPanning) return; // don't reposition tooltip during pan/drag
             if (_rafPending) return;
             _rafPending = true;
             const px = event.pageX, py = event.pageY;
@@ -1177,7 +1430,12 @@
           event.stopPropagation(); // Prevent click from bubbling up to the SVG background
           
           // Clicking a region with no data clears any existing selection
-          if (!hasAnyData(d)) { restoreMapAppearance(); return; } 
+          if (!hasAnyData(d)) { restoreMapAppearance(); return; }
+
+          // Reset the skeleton flag whenever the selected region changes so
+          // buildCloseButton() creates a fresh button rather than appending a
+          // duplicate into an existing #sidebar-header-container.
+          if (state.selectedFeature !== d) _detailSkeletonBuilt = false;
           
           state.selectedFeature = d;
           const selVal = getFilteredValue(d);
@@ -1190,8 +1448,17 @@
             updateSidebarToggle();
           }
 
-          // Dim all regions to 35% opacity, then fully highlight the selected one
-          mapGroup.selectAll("path.cd-region").style("opacity", 0.35).attr("stroke", c.bg);
+          // Interrupt all in-flight transitions on every path before applying the
+          // new selection state. Named interrupt("render") only cancels the render
+          // transition; calling interrupt() with no argument cancels everything,
+          // including the restoreMapAppearance transition and any rAF-pending frames
+          // that haven't committed yet. This prevents any in-flight animation from
+          // overwriting the opacity/stroke values set below.
+          cdPaths.interrupt();
+
+          // Dim all regions and reset all strokes — including stroke-width — so
+          // previously selected regions don't keep their thick border.
+          cdPaths.style("opacity", 0.35).attr("stroke", c.bg).attr("stroke-width", 0.5);
           d3.select(this).style("opacity", 1).attr("stroke", c.accent2).attr("stroke-width", 2).raise();
           
           zoomToFeature(d);       // Animate the map zooming in on the selected region
@@ -1214,20 +1481,24 @@
               if (scrollEl) scrollEl.scrollTo({ top: detailsDiv.node().offsetTop - 16, behavior: "smooth" });
             }, 50);
           }
-        })
+        });
 
-        // Animated transition: smoothly update opacity, stroke, and fill whenever
-        // the map is re-rendered (e.g. after a filter change).
-          .transition().duration(700)
-            .style("opacity", d => (state.selectedFeature && d !== state.selectedFeature) ? 0.35 : 1)
-            .attr("stroke", d => (d === state.selectedFeature) ? c.accent2 : c.bg)
-            .attr("stroke-width", d => (d === state.selectedFeature) ? 2 : 0.5)
-            .attr("fill", d => {
-              const val = getFilteredValue(d);
-              // Colour the region by facility count if > 0; otherwise use a grey shade
-              if (val) return colourScale(val);
-              return hasAnyData(d) ? c.noData : c.noDataNone; // Two different greys for "filtered-out" vs "no data"
-            });
+    // Animated transition: smoothly update opacity, stroke, and fill whenever
+    // the map is re-rendered (e.g. after a filter change).
+    // NOTE: this must be a separate statement from the .on() chain above.
+    // Calling .transition() in the same chain causes D3 to return a transition
+    // object instead of the selection — silently swallowing all .on() calls
+    // that follow, so no DOM event listeners would attach at all.
+    cdPaths.transition("render").duration(700)
+      .style("opacity", d => (state.selectedFeature && d !== state.selectedFeature) ? 0.35 : 1)
+      .attr("stroke", d => (d === state.selectedFeature) ? c.accent2 : c.bg)
+      .attr("stroke-width", d => (d === state.selectedFeature) ? 2 : 0.5)
+      .attr("fill", d => {
+        const val = getFilteredValue(d);
+        // Colour the region by facility count if > 0; otherwise use a grey shade
+        if (val) return colourScale(val);
+        return hasAnyData(d) ? c.noData : c.noDataNone; // Two different greys for "filtered-out" vs "no data"
+      });
   }
 
   // ─── SECTION 14: SIDEBAR DETAIL PANEL ────────────────────────────────────
@@ -1262,17 +1533,23 @@
       .on("mouseleave", function() { if (!isMobile()) d3.select(this).style("background", "transparent"); });
   }
 
+  // Tracks whether the detail panel skeleton has been built for the current selection.
+  // Reset to false when restoreMapAppearance() clears the selection.
+  let _detailSkeletonBuilt = false;
+
   function updateSidebarDetail() {
     const c = getC();
-    
-    // Hide any previously open accordion rows from a prior selection
-    if (document.getElementById("mfg-rows")) document.getElementById("mfg-rows").style.display = "none";
-    if (document.getElementById("tech-rows")) document.getElementById("tech-rows").style.display = "none";
-    if (document.getElementById("mro-rows")) document.getElementById("mro-rows").style.display = "none";
 
-    // If no region is selected, show a prompt inviting the user to click one
+    // ── No region selected: show prompt ──────────────────────────────────────
     if (!state.selectedFeature) {
-      detailsDiv.html(`<p style="color:${c.muted}; font-size:14px; font-weight:400; padding-bottom:32px;">Select a census division to analyse specific industry metrics.</p>`);
+      _detailSkeletonBuilt = false;
+      detailsDiv.selectAll("*").remove();
+      detailsDiv.append("p")
+        .style("color", c.muted)
+        .style("font-size", "14px")
+        .style("font-weight", "400")
+        .style("padding-bottom", "32px")
+        .text("Select a census division to analyse specific industry metrics.");
       return;
     }
 
@@ -1281,11 +1558,9 @@
     const geoId = state.selectedFeature._cduid;
 
     // Find all facilities in this region that pass the currently active filters.
-    // Uses the shared buildFilterPredicate() — same logic as getFilteredValue(),
-    // but was previously duplicated inline here.
     const passesFilters = buildFilterPredicate();
     const activeLocalFacilities = allFacilities.filter(f => f.cduid === geoId && passesFilters(f));
-    
+
     // Summarise how many of the local facilities fall into each operation type.
     // Only include types that have at least one facility.
     const stats = [
@@ -1327,122 +1602,255 @@
 
     // For each operation type, count how many matching local facilities fall into
     // each sub-category, then sort by count (highest first) and drop zeros.
-    const mfgData = Object.entries(MFG_KEYS).map(([col, label]) => ({ label, value: activeLocalFacilities.filter(f => f.isMfg && isTrue(f.rawRow[col])).length })).filter(d => d.value > 0).sort((a,b)=>b.value-a.value);
-    const techData = Object.entries(TECH_KEYS).map(([col, label]) => ({ label, value: activeLocalFacilities.filter(f => f.isTech && isTrue(f.rawRow[col])).length })).filter(d => d.value > 0).sort((a,b)=>b.value-a.value);
-    const mroData = Object.entries(MRO_KEYS).map(([col, label]) => ({ label, value: activeLocalFacilities.filter(f => f.isMro && isTrue(f.rawRow[col])).length })).filter(d => d.value > 0).sort((a,b)=>b.value-a.value);
+    const subDataMap = {
+      "Manufacturing_sum": Object.entries(MFG_KEYS).map(([col, label]) => ({ label, value: activeLocalFacilities.filter(f => f.isMfg && isTrue(f.rawRow[col])).length })).filter(d => d.value > 0).sort((a,b)=>b.value-a.value),
+      "Value-Add/Tech_sum": Object.entries(TECH_KEYS).map(([col, label]) => ({ label, value: activeLocalFacilities.filter(f => f.isTech && isTrue(f.rawRow[col])).length })).filter(d => d.value > 0).sort((a,b)=>b.value-a.value),
+      "MRO/ISS_sum": Object.entries(MRO_KEYS).map(([col, label]) => ({ label, value: activeLocalFacilities.filter(f => f.isMro && isTrue(f.rawRow[col])).length })).filter(d => d.value > 0).sort((a,b)=>b.value-a.value),
+    };
 
-    // Builds one row of the "Facility Operations Type" accordion list as an HTML string.
-    // Each row shows the operation type name and count. If sub-category data exists,
-    // the row is expandable (a ▼ chevron toggles the sub-rows visible/hidden).
-    function buildAccordionRow(k, v, subData, toggleId, rowsId, chevronId) {
-      const hasBreakdown = subData.length > 0;
-      const subRows = hasBreakdown ? `
-        <div id="${rowsId}" style="display:none; padding-bottom:4px;">
-          ${subData.map(({ label, value }) => `
-            <div style="display:flex; justify-content:space-between; align-items:center; padding:6px 0 6px 14px; border-bottom:1px solid ${c.border}; font-size:11px; font-family:'Inter', sans-serif;">
-              <span style="color:${c.muted}; font-weight:400; opacity:0.8;">${label}</span>
-              <span style="font-weight:500; color:${c.accent}; margin-left:8px; opacity:0.85;">${value.toLocaleString()}</span>
-            </div>
-          `).join("")}
-        </div>` : "";
-
-      return `
-        <div style="border-bottom:1px solid ${c.border};">
-          <div style="display:flex; justify-content:space-between; align-items:center; padding:12px 0; font-size:12px; font-family:'Inter', sans-serif; ${hasBreakdown ? "cursor:pointer;" : ""} user-select:none;" ${hasBreakdown ? `id="${toggleId}" role="button" tabindex="0" aria-expanded="false"` : ""}>
-            <span style="color:${c.muted}; font-weight:400;">${getLabel(k)}</span>
-            <span style="display:flex; align-items:center;"><span style="font-weight:600; color:${c.accent}">${v.toLocaleString()}</span>${hasBreakdown ? `<span id="${chevronId}" style="font-size:9px; color:${c.accent}; margin-left:8px; display:inline-block; transition:transform 0.2s;">▼</span>` : ""}</span>
-          </div>
-          ${subRows}
-        </div>`;
-    }
-
-    // HTML for the region name header (shown at the top of the detail panel)
-	const headerHtml = `
-      <div id="sidebar-header-container" style="display: flex; justify-content: space-between; align-items: flex-start; gap: 16px; margin-bottom: 12px; font-family: 'Inter', sans-serif;">
-        <div style="flex: 1;">
-          <h3 style="font-size: 24px; font-weight: 600; margin: 0 0 4px 0; color: ${c.text}; line-height: 1.2;">${props.CDNAME}</h3>
-          <div style="font-size: 11px; color: ${c.muted}; font-weight: 500; letter-spacing: 1px; text-transform: uppercase;">${props.PRNAME ?? ""}</div>
-        </div>
-      </div>
-    `;
-
-    // If no facilities pass the filters in this region, show a "no match" message
-    // instead of the donut chart and accordion.
+    // ── "No match" path — region selected but no facilities pass current filters ──
     if (activeLocalFacilities.length === 0) {
-      detailsDiv.html(`
-        ${headerHtml}
-        <div style="background: ${state.isDark ? "rgba(255,255,255,0.02)" : "rgba(0,0,0,0.02)"}; border: 1px dashed ${c.border}; border-radius: 6px; padding: 24px; text-align: center; margin-top: 20px;">
-          <p style="color: ${c.accent}; font-size: 14px; font-weight: 600; margin: 0 0 6px 0;">No facilities match active filters in this region.</p>
-          <p style="color: ${c.muted}; font-size: 12px; margin: 0; line-height: 1.4;">Try adjusting or resetting your operations and industry filters to see the regional capabilities.</p>
-        </div>
-      `);
+      _detailSkeletonBuilt = false;
+      detailsDiv.selectAll("*").remove();
 
-      // Append the "Close" / ✕ button to deselect the region
+      // Header
+      const noMatchHeader = detailsDiv.append("div")
+        .attr("id", "sidebar-header-container")
+        .style("display", "flex")
+        .style("justify-content", "space-between")
+        .style("align-items", "flex-start")
+        .style("gap", "16px")
+        .style("margin-bottom", "12px")
+        .style("font-family", "'Inter', sans-serif");
+      const noMatchTitleBox = noMatchHeader.append("div").style("flex", "1");
+      noMatchTitleBox.append("h3")
+        .style("font-size", "24px").style("font-weight", "600")
+        .style("margin", "0 0 4px 0").style("color", c.text).style("line-height", "1.2")
+        .text(props.CDNAME);
+      noMatchTitleBox.append("div")
+        .style("font-size", "11px").style("color", c.muted)
+        .style("font-weight", "500").style("letter-spacing", "1px").style("text-transform", "uppercase")
+        .text(props.PRNAME ?? "");
       buildCloseButton();
-        
+
+      // No-match message
+      const msgBox = detailsDiv.append("div")
+        .style("background", state.isDark ? "rgba(255,255,255,0.02)" : "rgba(0,0,0,0.02)")
+        .style("border", `1px dashed ${c.border}`)
+        .style("border-radius", "6px").style("padding", "24px")
+        .style("text-align", "center").style("margin-top", "20px");
+      msgBox.append("p")
+        .style("color", c.accent).style("font-size", "14px").style("font-weight", "600")
+        .style("margin", "0 0 6px 0")
+        .text("No facilities match active filters in this region.");
+      msgBox.append("p")
+        .style("color", c.muted).style("font-size", "12px").style("margin", "0").style("line-height", "1.4")
+        .text("Try adjusting or resetting your operations and industry filters to see the regional capabilities.");
       return;
     }
 
-    // Map each stats entry to the correct accordion row (with its specific sub-data and IDs)
-    const rows = stats.map(([k, v]) => {
-      if (k === "Manufacturing_sum") return buildAccordionRow(k, v, mfgData, "mfg-toggle", "mfg-rows", "mfg-chevron");
-      if (k === "Value-Add/Tech_sum") return buildAccordionRow(k, v, techData, "tech-toggle", "tech-rows", "tech-chevron");
-      if (k === "MRO/ISS_sum")        return buildAccordionRow(k, v, mroData,  "mro-toggle",  "mro-rows",  "mro-chevron");
-      return buildAccordionRow(k, v, [], "", "", "");
-    }).join("");
+    // ── Build skeleton once — reused on every subsequent filter-change call ──
+    if (!_detailSkeletonBuilt) {
+      _detailSkeletonBuilt = true;
+      detailsDiv.selectAll("*").remove();
 
-    // Inject the full detail panel HTML into the detailsDiv
-    detailsDiv.html(`
-      ${headerHtml}
-      <div id="donut-chart" style="margin-bottom:28px;"></div>
-      <p style="font-size:12px; color:${c.muted}; margin: 28px 0; line-height:1.5; font-weight:400;"><b>Please note:</b> a single facility may serve multiple defence industries.</p>
-      <div style="font-size:10px; font-weight:600; letter-spacing:1.5px; color:${c.muted}; margin-top:32px; margin-bottom:8px; text-transform:uppercase;">Facility Operations Type</div>
-      ${rows}
-      ${isMobile() ? `<div style="height: max(32px, env(safe-area-inset-bottom, 32px));"></div>` : ""}
-    `);
+      // ── Header ──
+      const header = detailsDiv.append("div")
+        .attr("id", "sidebar-header-container")
+        .style("display", "flex")
+        .style("justify-content", "space-between")
+        .style("align-items", "flex-start")
+        .style("gap", "16px")
+        .style("margin-bottom", "12px")
+        .style("font-family", "'Inter', sans-serif");
 
-    // Add the "Close" button to the now-rendered header container
-    buildCloseButton();
+      const titleBox = header.append("div").style("flex", "1");
+      titleBox.append("h3")
+        .attr("id", "detail-cd-name")
+        .style("font-size", "24px").style("font-weight", "600")
+        .style("margin", "0 0 4px 0").style("color", c.text).style("line-height", "1.2");
+      titleBox.append("div")
+        .attr("id", "detail-cd-province")
+        .style("font-size", "11px").style("color", c.muted)
+        .style("font-weight", "500").style("letter-spacing", "1px").style("text-transform", "uppercase");
 
-    // Wire up the accordion expand/collapse toggle for each operations type row.
-    // Clicking a row (or pressing Enter/Space on it) shows/hides its sub-rows
-    // and rotates the ▼ chevron to ▲.
-    [["mfg-toggle", "mfg-rows", "mfg-chevron"], ["tech-toggle", "tech-rows", "tech-chevron"], ["mro-toggle", "mro-rows", "mro-chevron"]].forEach(([toggleId, rowsId, chevronId]) => {
-      const btn = document.getElementById(toggleId); if (!btn) return;
-      const toggle = () => {
-        const isOpen = document.getElementById(rowsId).style.display !== "none";
-        document.getElementById(rowsId).style.display = isOpen ? "none" : "block";
-        document.getElementById(chevronId).style.transform = isOpen ? "rotate(0deg)" : "rotate(180deg)";
-        btn.setAttribute("aria-expanded", isOpen ? "false" : "true");
-      };
-      btn.addEventListener("click", toggle);
-      // Keyboard accessibility: Enter and Space also trigger the toggle
-      btn.addEventListener("keydown", (e) => { if (e.key === "Enter" || e.key === " ") { e.preventDefault(); toggle(); } });
-    });
+      // Close button — attached once, never re-created
+      buildCloseButton();
 
-    // If there are no industry sectors to show, skip the donut chart entirely
+      // ── Donut placeholder ──
+      detailsDiv.append("div").attr("id", "donut-chart").style("margin-bottom", "28px");
+
+      // ── Note ──
+      detailsDiv.append("p")
+        .attr("id", "detail-note")
+        .style("font-size", "12px").style("color", c.muted)
+        .style("margin", "28px 0").style("line-height", "1.5").style("font-weight", "400")
+        .html("<b>Please note:</b> a single facility may serve multiple defence industries.");
+
+      // ── Accordion section heading ──
+      detailsDiv.append("div")
+        .style("font-size", "10px").style("font-weight", "600")
+        .style("letter-spacing", "1.5px").style("color", c.muted)
+        .style("margin-top", "32px").style("margin-bottom", "8px").style("text-transform", "uppercase")
+        .text("Facility Operations Type");
+
+      // ── Accordion shell ── (rows are joined into this container)
+      detailsDiv.append("div").attr("id", "accordion-shell");
+
+      // ── Safe-area spacer on mobile ──
+      if (isMobile()) {
+        detailsDiv.append("div").style("height", "max(32px, env(safe-area-inset-bottom, 32px))");
+      }
+    }
+
+    // ── Per-render updates (no DOM creation) ─────────────────────────────────
+
+    // Update header text
+    detailsDiv.select("#detail-cd-name").style("color", c.text).text(props.CDNAME);
+    detailsDiv.select("#detail-cd-province").style("color", c.muted).text(props.PRNAME ?? "");
+    detailsDiv.select("#detail-note").style("color", c.muted);
+
+    // ── Accordion rows — D3 join keyed on operation key ──────────────────────
+    // Rows are created on enter and updated in-place on subsequent calls.
+    // Accordion listener is attached once in `enter`; never re-attached.
+    d3.select("#accordion-shell")
+      .selectAll(".accordion-row")
+      .data(stats, d => d[0])   // key by operation key for stable identity
+      .join(
+        // ── Enter: build the full row DOM once ──
+        enter => {
+          const row = enter.append("div")
+            .attr("class", "accordion-row")
+            .style("border-bottom", `1px solid ${c.border}`);
+
+          // Toggle header row
+          const toggleDiv = row.append("div")
+            .attr("class", "accordion-toggle")
+            .style("display", "flex").style("justify-content", "space-between")
+            .style("align-items", "center").style("padding", "12px 0")
+            .style("font-size", "12px").style("font-family", "'Inter', sans-serif")
+            .style("user-select", "none");
+
+          toggleDiv.append("span")
+            .attr("class", "accordion-label")
+            .style("color", c.muted).style("font-weight", "400");
+
+          const right = toggleDiv.append("span")
+            .style("display", "flex").style("align-items", "center");
+          right.append("span")
+            .attr("class", "accordion-count")
+            .style("font-weight", "600").style("color", c.accent);
+          right.append("span")
+            .attr("class", "accordion-chevron")
+            .style("font-size", "9px").style("color", c.accent)
+            .style("margin-left", "8px").style("display", "none")
+            .style("transition", "transform 0.2s").text("▼");
+
+          // Sub-rows container
+          row.append("div")
+            .attr("class", "accordion-sub-rows")
+            .style("display", "none").style("padding-bottom", "4px");
+
+          // Attach accordion click + keydown listener once on enter
+          toggleDiv
+            .attr("role", "button").attr("tabindex", "0").attr("aria-expanded", "false")
+            .on("click", function() {
+              const subEl = this.closest(".accordion-row").querySelector(".accordion-sub-rows");
+              const chevEl = this.querySelector(".accordion-chevron");
+              if (!subEl || subEl.children.length === 0) return; // no sub-rows, nothing to toggle
+              const isOpen = subEl.style.display !== "none";
+              subEl.style.display = isOpen ? "none" : "block";
+              if (chevEl) chevEl.style.transform = isOpen ? "rotate(0deg)" : "rotate(180deg)";
+              this.setAttribute("aria-expanded", isOpen ? "false" : "true");
+            })
+            .on("keydown", function(e) {
+              if (e.key === "Enter" || e.key === " ") { e.preventDefault(); this.click(); }
+            });
+
+          return row;
+        },
+        // ── Update: reuse existing row DOM ──
+        update => update
+      )
+      // Runs on both enter and update — keeps displayed values current
+      .each(function([k, v]) {
+        const row    = d3.select(this);
+        const subData = subDataMap[k] ?? [];
+        const hasBreakdown = subData.length > 0;
+
+        row.style("border-bottom", `1px solid ${c.border}`);
+
+        const toggleDiv = row.select(".accordion-toggle");
+        toggleDiv.style("cursor", hasBreakdown ? "pointer" : "default");
+
+        row.select(".accordion-label").style("color", c.muted).text(getLabel(k));
+        row.select(".accordion-count").style("color", c.accent).text(v.toLocaleString());
+
+        const chevron = row.select(".accordion-chevron");
+        chevron.style("display", hasBreakdown ? "inline-block" : "none").style("color", c.accent);
+
+        // Rebuild sub-rows (counts may have changed with filter update)
+        const subContainer = row.select(".accordion-sub-rows");
+        // Reset open state when data changes (counts changed = new filter applied)
+        subContainer.style("display", "none");
+        chevron.style("transform", "rotate(0deg)");
+        toggleDiv.attr("aria-expanded", "false");
+
+        subContainer.selectAll(".sub-row")
+          .data(subData, d => d.label)
+          .join(
+            enter => {
+              const subRow = enter.append("div").attr("class", "sub-row")
+                .style("display", "flex").style("justify-content", "space-between")
+                .style("align-items", "center").style("padding", "6px 0 6px 14px")
+                .style("border-bottom", `1px solid ${c.border}`)
+                .style("font-size", "11px").style("font-family", "'Inter', sans-serif");
+              subRow.append("span").attr("class", "sub-label")
+                .style("color", c.muted).style("font-weight", "400").style("opacity", "0.8");
+              subRow.append("span").attr("class", "sub-count")
+                .style("font-weight", "500").style("color", c.accent)
+                .style("margin-left", "8px").style("opacity", "0.85");
+              return subRow;
+            },
+            update => update,
+            exit => exit.remove()
+          )
+          .each(function(d) {
+            d3.select(this).select(".sub-label").text(d.label);
+            d3.select(this).select(".sub-count").text(d.value.toLocaleString());
+          });
+      });
+
+    // ── Donut chart — always rebuild when selection changes or filters update ──
+    // The donut is fully data-driven and small, so a targeted rebuild here is
+    // cheaper than diffing the SVG arcs. Clear and redraw.
+    const donutEl = document.getElementById("donut-chart");
+    if (!donutEl) return;
+    d3.select(donutEl).selectAll("*").remove();
     if (!industryData.length) return;
     
     // ─── Donut Chart ──────────────────────────────────────────────────────────
     //  Draws a donut chart showing the breakdown of facilities by defence industry.
-    //  Hovering a slice updates the centre label to show that industry's count.
+    //  Hovering/tapping a slice updates the centre label to show that industry's count.
+    //
+    //  Input handling uses the Pointer Events API (pointerenter / pointerleave /
+    //  pointerup) which unifies mouse, touch, and stylus in a single event stream.
+    //  Calling event.preventDefault() in pointerup suppresses the browser's
+    //  synthetic click that would otherwise fire ~300ms later on touch devices —
+    //  eliminating the ghost-click race without needing a setTimeout guard.
     const SIZE = 260; const RADIUS = SIZE / 2; const INNER = RADIUS * 0.55;
+    const arcNormal   = d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2);
+    const arcExpanded = d3.arc().innerRadius(INNER).outerRadius(RADIUS + 6);
+
     const svgD = d3.select("#donut-chart").append("svg").attr("width", SIZE).attr("height", SIZE + 20).style("overflow", "visible");
-    // On mobile, block all pointer events on the donut for 450ms — this absorbs the
-    // synthesized ghost mouseover/click the browser fires after a touchend at the
-    // same screen coordinates as the map tap that opened this panel.
-    if (isMobile()) {
-      svgD.style("pointer-events", "none");
-      setTimeout(() => svgD.style("pointer-events", null), 450);
-    }
     // Centre group — all paths and labels are relative to the donut's centre
     const g = svgD.append("g").attr("transform", `translate(${RADIUS},${RADIUS})`);
     
-    // Centre label: shows total facility count by default; updates on hover
+    // Centre label: shows total facility count by default; updates on hover/tap
     const cVal = g.append("text").attr("text-anchor", "middle").attr("dy", "-0.15em").style("font-size", "22px").style("font-weight", "600").style("fill", c.text).style("font-family", "Inter");
     const cLab = g.append("text").attr("text-anchor", "middle").attr("dy", "1.1em").style("font-size", "9px").style("font-weight", "500").style("letter-spacing", "1px").style("fill", c.muted).style("font-family", "Inter");
 
-    // showDefault restores the centre label to the total count when not hovering
+    // showDefault restores the centre label to the total count when not interacting
     const showDefault = () => { 
       cVal.text(activeLocalFacilities.length.toLocaleString()); 
       cLab.text(activeLocalFacilities.length === 1 ? "FACILITY" : "FACILITIES"); 
@@ -1450,31 +1858,57 @@
     showDefault();
 
     // Draw the donut slices. d3.pie() converts value counts to arc angles.
-    let _activeTouchSlice = null;
-    g.selectAll("path").data(d3.pie().value(d => d.value).sort(null)(industryData)).join("path").attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)).attr("fill", d => INDUSTRY_COLOURS[d.data.label]).attr("stroke", c.bg).attr("stroke-width", 2).style("cursor", "pointer").style("-webkit-tap-highlight-color", "transparent")
-      // On hover: expand the slice outward and show its sector name/count in the centre
-      .on("mouseover", function(_, d) { d3.select(this).transition().duration(150).attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS + 6)(d)); cVal.text(d.data.value); cLab.text(d.data.label.toUpperCase()); })
-      // On mouse-out: shrink the slice back and restore the default centre label
-      .on("mouseout", function(_, d) { d3.select(this).transition().duration(150).attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)(d)); showDefault(); })
-      // Touch: tap to expand and show label; tap again or tap another to collapse
-      .on("touchstart", function(event, d) {
-        event.stopPropagation();
-        event.preventDefault();
-        const self = d3.select(this);
-        if (_activeTouchSlice && _activeTouchSlice.node() !== this) {
-          _activeTouchSlice.transition().duration(150).attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)(_activeTouchSlice.datum()));
-        }
-        if (_activeTouchSlice && _activeTouchSlice.node() === this) {
-          self.transition().duration(150).attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS - 2)(d));
-          showDefault();
-          _activeTouchSlice = null;
-        } else {
-          self.transition().duration(150).attr("d", d3.arc().innerRadius(INNER).outerRadius(RADIUS + 6)(d));
+    // _activeSlice tracks the currently expanded slice on touch devices.
+    let _activeSlice = null;
+
+    g.selectAll("path")
+      .data(d3.pie().value(d => d.value).sort(null)(industryData))
+      .join("path")
+        .attr("d", arcNormal)
+        .attr("fill", d => INDUSTRY_COLOURS[d.data.label])
+        .attr("stroke", c.bg)
+        .attr("stroke-width", 2)
+        .style("cursor", "pointer")
+        .style("-webkit-tap-highlight-color", "transparent")
+
+        // ── Hover (mouse only — pointerType check skips touch) ──
+        .on("pointerenter", function(event, d) {
+          if (event.pointerType === "touch") return;
+          d3.select(this).transition().duration(150).attr("d", arcExpanded(d));
           cVal.text(d.data.value);
           cLab.text(d.data.label.toUpperCase());
-          _activeTouchSlice = self;
-        }
-      });
+        })
+        .on("pointerleave", function(event, d) {
+          if (event.pointerType === "touch") return;
+          d3.select(this).transition().duration(150).attr("d", arcNormal(d));
+          showDefault();
+        })
+
+        // ── Tap (touch only) ──
+        // preventDefault() on pointerup suppresses the subsequent synthetic click,
+        // replacing the old pointer-events:none / setTimeout(450) approach.
+        .on("pointerup", function(event, d) {
+          if (event.pointerType !== "touch") return;
+          event.preventDefault(); // kills the ghost click — no setTimeout needed
+          const self = d3.select(this);
+          if (_activeSlice?.node() === this) {
+            // Tap the active slice again: collapse it
+            self.transition().duration(150).attr("d", arcNormal(d));
+            showDefault();
+            _activeSlice = null;
+          } else {
+            // Collapse any previously active slice
+            if (_activeSlice) {
+              _activeSlice.transition().duration(150)
+                .attr("d", arcNormal(_activeSlice.datum()));
+            }
+            // Expand this slice
+            self.transition().duration(150).attr("d", arcExpanded(d));
+            cVal.text(d.data.value);
+            cLab.text(d.data.label.toUpperCase());
+            _activeSlice = self;
+          }
+        });
 
     // Chart title below the donut
     svgD.append("text").attr("transform", `translate(0, ${SIZE + 20})`).style("font-size", "11px").style("font-weight", "600").style("letter-spacing", "1px").style("fill", c.muted).style("font-family", "Inter").text("DEFENCE INDUSTRIES SERVED");
@@ -1968,16 +2402,24 @@
 
   // ─── SECTION 17: GLOBAL UI UPDATE ────────────────────────────────────────
   //  Called whenever the dark/light theme changes (or on initial load).
-  //  Reapplies all colours throughout the UI, then rebuilds/refreshes controls.
+  //  Sets the body.dark class (which flips all CSS token values in one paint),
+  //  then handles the remaining items that genuinely need JS: mobile pill colour,
+  //  collapse button position, legend height on resize, and the themeToggle icon.
   function updateUI() {
     invalidateColourCache(); // Force fresh colours for the new theme
     const c = getC();
-    container.style("background", c.bg).style("color", c.text);
+
+    // Sync body class so CSS custom properties resolve to the correct values.
+    document.body.classList.toggle("dark", state.isDark);
+    // container background / text colour is now driven by CSS, but D3 still
+    // owns the inline style from the initial append — clear it so the CSS rule wins.
+    container.style("background", null).style("color", null);
 
     if (isMobile()) {
+      // Border sides differ between mobile and desktop — these can't be expressed
+      // purely via the shared CSS rule, so we still set them here.
       sidebar
-        .style("background", c.surface)
-        .style("border-top", `1px solid ${c.border}`)
+        .style("border-top", `1px solid var(--border)`)
         .style("border-right", "none");
       d3.select("#mobile-sheet-handle").style("background", c.muted);
       const pillEl = d3.select("#mobile-filter-toggle");
@@ -1991,25 +2433,16 @@
           .style("border", `1px solid ${c.accent}`);
       }
     } else {
-      sidebar.style("background", c.surface).style("border-right", `1px solid ${c.border}`);
-      collapseBtn.style("background", c.surface).style("color", c.accent).style("border", `1px solid ${c.border}`);
+      sidebar.style("border-right", `1px solid var(--border)`);
+      // collapseBtn sits outside #control-panel so the shared CSS rule doesn't apply —
+      // set all three colour properties explicitly on every theme change.
+      collapseBtn
+        .style("background", c.surface)
+        .style("color",      c.accent)
+        .style("border",     `1px solid ${c.border}`);
     }
 
-    // Apply colours to the info panel, legend box, tooltip, and control buttons
-    infoSidebar.style("background", c.surface).style("border-left", `1px solid ${c.border}`);
-    themeToggle.text(state.isDark ? "☼" : "☾"); // Moon for light mode (click to go dark); sun for dark mode
-    legendOverlay.style("background", state.isDark ? "rgba(22,27,36,0.8)" : "rgba(255,255,255,0.9)").style("border", `1px solid ${c.border}`);
-    tooltip.style("background", c.surface).style("color", c.text).style("border", `1px solid ${c.border}`).style("box-shadow", state.isDark ? "0 10px 30px rgba(0,0,0,0.5)" : "0 10px 30px rgba(0,0,0,0.1)");
-
-    // Hover highlight effect on all control panel buttons
-    [themeToggle, zoomInBtn, zoomOutBtn, homeBtn, infoBtn, resetFiltersBtn].forEach(btn => {
-      btn
-        .style("background", c.surface)
-        .style("color",      c.text)
-        .style("border",     `1px solid ${c.border}`)
-        .on("mouseenter", function() { d3.select(this).style("border", `1px solid ${c.accent}`).style("transform", "scale(1.08)"); })
-        .on("mouseleave", function() { d3.select(this).style("border", `1px solid ${c.border}`).style("transform", "scale(1)"); });
-    });
+    themeToggle.text(state.isDark ? "☼" : "☾"); // Moon for light mode; sun for dark mode
 
     // Re-apply grid layout and legend height in case orientation changed
     controlPanel.style("grid-template-columns", isLandscapeMobile() ? "1fr 1fr" : "1fr");
@@ -2052,13 +2485,16 @@
     const c = getC();
     const wasSelected = !!state.selectedFeature;
     state.selectedFeature = null;
+    _detailSkeletonBuilt = false; // Force a full skeleton rebuild on the next region selection
     d3.select("#legend-marker").style("display", "none");
     // Re-enable the operations/industry selectors (they may have been locked)
     d3.select("#analytics-selector").property("disabled", false).style("opacity", "1").style("cursor", "pointer");
     d3.select("#industry-selector").style("pointer-events", "auto").style("opacity", "1");
-    // Animate all regions back to full opacity with their default border
-    mapGroup.selectAll("path.cd-region")
-      .transition().duration(750)
+    // Animate all regions back to full opacity using the cached selection — no new DOM query.
+    // Interrupt any in-flight transitions first (e.g. a rapid click before this fires).
+    cdPaths.interrupt();
+    cdPaths
+      .transition("restore").duration(750)
       .style("opacity", 1)
       .attr("stroke", c.bg)
       .attr("stroke-width", 0.5);
@@ -2096,6 +2532,7 @@
       // Full teardown required: layout structure differs between mobile and desktop
       controlsDiv.selectAll("*").remove();
       _controlsBuilt = false;
+      _detailSkeletonBuilt = false;
     }
 
     updateUI();
@@ -2129,13 +2566,14 @@
       if (!d) return;
       event.preventDefault();
       if (!hasAnyData(d)) { restoreMapAppearance(); return; }
+      if (state.selectedFeature !== d) _detailSkeletonBuilt = false;
       state.selectedFeature = d;
       const selVal = getFilteredValue(d);
       updateLegendMarker(selVal > 0 ? selVal : null, true);
       if (!state.sidebarOpen) { state.sidebarOpen = true; updateSidebarToggle(); }
-      mapGroup.selectAll("path.cd-region").style("opacity", 0.35).attr("stroke", getC().bg);
-      // Highlight the hovered path element directly
-      mapGroup.selectAll("path.cd-region")
+      // Dim all regions and highlight the focused one using the cached selection
+      cdPaths.style("opacity", 0.35).attr("stroke", getC().bg);
+      cdPaths
         .filter(p => p === d)
         .style("opacity", 1).attr("stroke", getC().accent2).attr("stroke-width", 2).raise();
       zoomToFeature(d);
@@ -2146,8 +2584,24 @@
 
   // ─── SECTION 22: APPLICATION STARTUP ─────────────────────────────────────
   //  With all functions defined, kick off the application by:
-  //    1. Building the UI (colours, controls, sidebar)
-  //    2. Drawing the initial map
+  //    1. Fading out the loading overlay (data is ready)
+  //    2. Building the UI (colours, controls, sidebar)
+  //    3. Drawing the initial map
+
+  // Sync body.dark immediately so CSS custom-property tokens resolve correctly
+  // before updateUI() reads them via getComputedStyle.
+  document.body.classList.toggle("dark", state.isDark);
+
+  // Dismiss the CSS spinner injected in index.html.
+  // Trigger the CSS fade-out transition first, then remove the node once the
+  // 400 ms animation completes so it can't intercept clicks or be tab-focused.
+  (function dismissLoader() {
+    const el = document.getElementById("map-loading");
+    if (!el) return;
+    el.classList.add("fade-out");
+    el.addEventListener("transitionend", () => el.remove(), { once: true });
+  })();
+
   updateUI();
   renderMap();
   

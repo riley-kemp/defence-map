@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Canadian Defence Manufacturing Map</title>
+    <title>Canadian Defence Manufacturing Industry Map</title>
     <script src="https://d3js.org/d3.v7.min.js"></script>
 	<style>
 		body, html {
@@ -20,11 +20,147 @@
 			display: flex;
 			position: relative;
 		}
+		
+		:root {
+		  --bg:          #f8f9fa;
+		  --surface:     #ffffff;
+		  --border:      rgba(0,0,0,0.08);
+		  --text:        #1a1a1a;
+		  --muted:       #717171;
+		  --accent:      #00a94f;
+		  --accent2:     #d97706;
+		  --no-data:     #adb1ba;
+		  --no-data-none:#e0e2e6;
+		  --shadow-sm:    0 10px 30px rgba(0,0,0,0.1);
+		  --legend-bg:    rgba(255,255,255,0.9);
+		}
+		body.dark {
+		  background-color: #0e1117;
+		  --bg:          #0e1117;
+		  --surface:     #161b24;
+		  --border:      rgba(255,255,255,0.1);
+		  --text:        #e8eaf0;
+		  --muted:       #6b7280;
+		  --accent2:     #f0a500;
+		  --no-data:     #2a3040;
+		  --no-data-none:#191d25;
+		  --shadow-sm:    0 10px 30px rgba(0,0,0,0.5);
+		  --legend-bg:    rgba(22,27,36,0.8);
+		}
+
+		/* Example component rule */
+		#control-panel button {
+		  background: var(--surface);
+		  color:      var(--text);
+		  border:     1px solid var(--border);
+		  transition: background 0.15s, color 0.15s, border 0.15s, transform 0.2s;
+		}
+		#control-panel button:hover {
+		  border-color: var(--accent);
+		  transform: scale(1.08);
+		}
+
+		/* ── Initial loading overlay ── */
+		#map-loading {
+			position: absolute;
+			inset: 0;
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			justify-content: center;
+			gap: 20px;
+			background: #f8f9fa;
+			z-index: 9999;
+			transition: opacity 0.4s ease;
+		}
+		#map-loading.fade-out {
+			opacity: 0;
+			pointer-events: none;
+		}
+		/* Contents start invisible and fade in together once the logo is cached */
+		#map-loading-inner {
+			display: flex;
+			flex-direction: column;
+			align-items: center;
+			gap: 20px;
+			opacity: 0;
+			transition: opacity 0.3s ease;
+		}
+		#map-loading-inner.ready {
+			opacity: 1;
+		}
+		#loading-logo {
+			width: 160px;
+			height: auto;
+			display: block;
+		}
+		.map-spinner {
+			width: 36px;
+			height: 36px;
+			border: 3px solid rgba(0, 169, 79, 0.2);
+			border-top-color: #00a94f;
+			border-radius: 50%;
+			animation: spin 0.8s linear infinite;
+		}
+		@keyframes spin {
+			to { transform: rotate(360deg); }
+		}
+		.map-loading-text {
+			font-family: 'Inter', sans-serif;
+			font-size: 13px;
+			font-weight: 500;
+			letter-spacing: 0.5px;
+			color: #717171;
+			margin-top: -4px;
+		}
+		@media (prefers-color-scheme: dark) {
+			body, html { background-color: #0e1117; }
+			#map-loading { background: #0e1117; }
+			.map-loading-text { color: #6b7280; }
+			body.dark #map-loading {background: #0e1117;}
+		}
 	</style>
 </head>
 <body>
 
-    <div id="map-container"></div>
+    <div id="map-container">
+      <div id="map-loading">
+        <div id="map-loading-inner">
+          <img id="loading-logo" alt="Trillium Network for Advanced Manufacturing Defence Manufacturing Industry Map" />
+          <div class="map-spinner"></div>
+          <span class="map-loading-text">Loading defence manufacturing industry map…</span>
+        </div>
+      </div>
+    </div>
+
+    <script>
+      // Determine theme, build the correct logo URL, then pre-fetch it via a
+      // hidden Image() object. Only once the SVG has fully downloaded do we
+      // assign it to the visible <img> and fade in the whole inner group —
+      // so the logo, spinner, and text all appear together in one clean reveal.
+      // If the fetch fails (e.g. offline) we still reveal the spinner so the
+      // user isn't stuck on a blank screen.
+      (function() {
+        var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
+        var base = "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/assets/";
+        var url  = dark
+          ? base + "Trillium_full_color_ondark.svg"
+          : base + "Trillium_full_color_onlight.svg";
+
+        function reveal(src) {
+          var logo  = document.getElementById("loading-logo");
+          var inner = document.getElementById("map-loading-inner");
+          if (src) logo.src = src;
+          // rAF ensures the src assignment has been painted before the fade starts
+          requestAnimationFrame(function() { inner.classList.add("ready"); });
+        }
+
+        var img = new Image();
+        img.onload  = function() { reveal(url); };
+        img.onerror = function() { reveal(null); }; // show spinner even if logo fails
+        img.src = url;
+      })();
+    </script>
 
     <script src="app.js"></script>
 </body>
