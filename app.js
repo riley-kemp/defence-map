@@ -115,16 +115,34 @@
   //  (the direction vertices are listed — clockwise vs counter-clockwise)
   //  for D3 to fill them correctly. This function reverses the order of
   //  each ring's coordinates to match D3's expectations.
+  //  We do a targeted coordinate-only copy (not a full deep-clone) to keep
+  //  this cheap on large GeoJSON files.
   function fixWinding(feature) {
-    const f = JSON.parse(JSON.stringify(feature)); // Deep-clone so we don't modify the original
-    const { type, coordinates } = f.geometry ?? {};
-    if (type === "Polygon")      coordinates.forEach(r => r.reverse());
-    if (type === "MultiPolygon") coordinates.forEach(p => p.forEach(r => r.reverse()));
-    return f;
+    const { type, coordinates } = feature.geometry ?? {};
+    let newCoords;
+    if (type === "Polygon") {
+      newCoords = coordinates.map(r => r.slice().reverse());
+    } else if (type === "MultiPolygon") {
+      newCoords = coordinates.map(p => p.map(r => r.slice().reverse()));
+    } else {
+      return feature; // Nothing to fix for other geometry types
+    }
+    return {
+      ...feature,
+      geometry: { ...feature.geometry, coordinates: newCoords }
+    };
   }
-  
+
   // Apply the winding fix to every region in the GeoJSON dataset.
-  const fixedData = rawGeo;
+  const fixedData = { ...rawGeo, features: rawGeo.features.map(fixWinding) };
+
+  // Pre-compute the CDUID string for every feature once at load time.
+  // getFilteredValue, hasAnyData, and updateSidebarDetail previously repeated
+  // this three-way property lookup + toString().trim() on every call.
+  // Storing it as f._cduid eliminates hundreds of redundant lookups per render.
+  fixedData.features.forEach(f => {
+    f._cduid = (f.properties.CDUID || f.properties.cduid || f.properties.CD_UID)?.toString().trim() ?? "";
+  });
 
   // ─── SECTION 5: APPLICATION STATE ────────────────────────────────────────
   //  A single `state` object holds everything that can change while the user
@@ -168,8 +186,7 @@
     allFacilities.filter(f => f.isDefence).map(f => f.cduid)
   );
   function hasAnyData(feature) {
-    const geoId = (feature.properties.CDUID || feature.properties.cduid || feature.properties.CD_UID)?.toString().trim();
-    return _cduidsWithData.has(geoId);
+    return _cduidsWithData.has(feature._cduid);
   }
 
   // Cache of cduid → filtered facility count, invalidated on every filter/render change.
@@ -179,45 +196,60 @@
 
   // Returns how many facilities in a given region pass ALL currently active filters.
   // This number determines the colour intensity of the region on the map.
+  // ── Shared filter predicate ──────────────────────────────────────────────
+  // Returns true if a facility passes all currently active Operations and
+  // Industry filters. Used by both getFilteredValue (cache builder) and
+  // updateSidebarDetail — previously the same logic was duplicated in both.
+  //
+  // Call buildFilterPredicate() once per render/filter-change to capture the
+  // current filter state, then pass the returned function to per-facility loops.
+  function buildFilterPredicate() {
+    const analyticsActive  = state.currentAnalyticsKeys.size > 0;
+    const industriesActive = state.currentIndustries.size > 0;
+    const includes = industriesActive
+      ? [...state.currentIndustries.entries()].filter(([, s]) => s === "include").map(([ind]) => ind)
+      : [];
+    const excludes = industriesActive
+      ? [...state.currentIndustries.entries()].filter(([, s]) => s === "exclude").map(([ind]) => ind)
+      : [];
+    const mode = state.industryFilterMode;
+
+    return function facilityPassesFilters(f) {
+      if (!f.isDefence) return false;
+
+      if (analyticsActive) {
+        const ok = (state.currentAnalyticsKeys.has("Manufacturing_sum") && f.isMfg)
+                || (state.currentAnalyticsKeys.has("Value-Add/Tech_sum") && f.isTech)
+                || (state.currentAnalyticsKeys.has("MRO/ISS_sum")        && f.isMro);
+        if (!ok) return false;
+      }
+
+      if (industriesActive) {
+        if (excludes.some(ind => f.industries.has(ind))) return false;
+        if (includes.length > 0) {
+          const passes = mode === "and"
+            ? includes.every(ind => f.industries.has(ind))
+            : includes.some(ind => f.industries.has(ind));
+          if (!passes) return false;
+        }
+      }
+
+      return true;
+    };
+  }
+
   function getFilteredValue(feature) {
     // Build the cache on first call within a render pass
     if (!_filteredValueCache) {
-      // Hoist filter state outside the per-facility loop
-      const analyticsActive = state.currentAnalyticsKeys.size > 0;
-      const industriesActive = state.currentIndustries.size > 0;
-      const includes = industriesActive
-        ? [...state.currentIndustries.entries()].filter(([, s]) => s === "include").map(([ind]) => ind)
-        : [];
-      const excludes = industriesActive
-        ? [...state.currentIndustries.entries()].filter(([, s]) => s === "exclude").map(([ind]) => ind)
-        : [];
-
+      const passes = buildFilterPredicate();
       _filteredValueCache = new Map();
       for (const f of allFacilities) {
-        if (!f.isDefence) continue;
-
-        if (analyticsActive) {
-          const ok = (state.currentAnalyticsKeys.has("Manufacturing_sum") && f.isMfg)
-                  || (state.currentAnalyticsKeys.has("Value-Add/Tech_sum") && f.isTech)
-                  || (state.currentAnalyticsKeys.has("MRO/ISS_sum")        && f.isMro);
-          if (!ok) continue;
-        }
-
-        if (industriesActive) {
-          if (excludes.some(ind => f.industries.has(ind))) continue;
-          if (includes.length > 0) {
-            const passes = state.industryFilterMode === "and"
-              ? includes.every(ind => f.industries.has(ind))
-              : includes.some(ind => f.industries.has(ind));
-            if (!passes) continue;
-          }
-        }
-
+        if (!passes(f)) continue;
         _filteredValueCache.set(f.cduid, (_filteredValueCache.get(f.cduid) ?? 0) + 1);
       }
     }
 
-    const geoId = (feature.properties.CDUID || feature.properties.cduid || feature.properties.CD_UID)?.toString().trim();
+    const geoId = feature._cduid;
     return _filteredValueCache.get(geoId) ?? 0;
   }
 
@@ -924,8 +956,8 @@
 
     // Create an SVG inside the legend for the gradient bar
     const svgL = legendOverlay.append("svg").attr("id", "legend-bar-svg").attr("width", BAR_WIDTH).attr("height", 38).style("display", "block");
-    // A unique random ID prevents conflicts if the legend is rebuilt multiple times
-    const gradId = `legend-grad-${Math.random().toString(36).slice(2, 11)}`;
+    // Use a stable ID so the browser can reuse the SVG defs across legend rebuilds.
+    const gradId = "legend-grad";
     const grad = svgL.append("defs").append("linearGradient").attr("id", gradId);
     
     // Add colour stops at 0%, 50%, and 100% of the value range
@@ -1096,7 +1128,20 @@
           `);
         })
         // Tooltip follows the mouse as it moves
-        .on("mousemove", isMobile() ? null : event => tooltip.style("top", `${event.pageY - 10}px`).style("left", `${event.pageX + 20}px`))
+        .on("mousemove", isMobile() ? null : (() => {
+          // Throttle to one reposition per animation frame (~60 fps max).
+          // Without this, mousemove fires on every pixel and queues redundant style writes.
+          let _rafPending = false;
+          return function(event) {
+            if (_rafPending) return;
+            _rafPending = true;
+            const px = event.pageX, py = event.pageY;
+            requestAnimationFrame(() => {
+              tooltip.style("top", `${py - 10}px`).style("left", `${px + 20}px`);
+              _rafPending = false;
+            });
+          };
+        })())
         .on("mouseleave", isMobile() ? null : function() {
           state.hoveredFeature = null;
           state._hoveredEl = null;
@@ -1189,6 +1234,34 @@
   //  Builds the content shown in the sidebar after a Census Division is clicked.
   //  Includes: region name, donut chart of industry breakdown,
   //  and an accordion list of facility operation types with sub-categories.
+
+  // Shared helper: appends the "Close / ✕" button to #sidebar-header-container.
+  // Previously duplicated verbatim in both the "no match" and normal render paths.
+  function buildCloseButton() {
+    const c = getC();
+    d3.select("#sidebar-header-container")
+      .append("button")
+      .attr("id", "sidebar-back")
+      .text(isMobile() ? "✕" : "CLOSE CENSUS DIVISION DETAILS")
+      .style("display", isMobile() ? "none" : null)
+      .style("font-family", "'Inter', sans-serif")
+      .style("font-size", isMobile() ? "18px" : "9px")
+      .style("font-weight", isMobile() ? "400" : "600")
+      .style("background", "transparent")
+      .style("border", isMobile() ? "none" : `1px solid ${c.accent}`)
+      .style("color", isMobile() ? c.muted : c.accent)
+      .style("padding", isMobile() ? "0 4px" : "4px 9px")
+      .style("border-radius", "4px")
+      .style("cursor", "pointer")
+      .style("white-space", "nowrap")
+      .style("transition", "all 0.2s ease")
+      .style("margin-top", "2px")
+      .style("line-height", "1")
+      .on("click", restoreMapAppearance)
+      .on("mouseenter", function() { if (!isMobile()) d3.select(this).style("background", state.isDark ? "rgba(78,204,163,0.12)" : "rgba(0,169,79,0.08)"); })
+      .on("mouseleave", function() { if (!isMobile()) d3.select(this).style("background", "transparent"); });
+  }
+
   function updateSidebarDetail() {
     const c = getC();
     
@@ -1204,38 +1277,14 @@
     }
 
     const props = state.selectedFeature.properties;
-    // Normalise the region ID across possible property name variations in the GeoJSON
-    const geoId = (props.CDUID || props.cduid || props.CD_UID)?.toString().trim();
+    // Use the pre-computed _cduid (avoids repeated three-way property lookup)
+    const geoId = state.selectedFeature._cduid;
 
-    // Find all facilities in this region that pass the currently active filters
-    const activeLocalFacilities = allFacilities.filter(f => {
-      if (f.cduid !== geoId) return false;
-      
-      // Apply the same operations filter logic used in getFilteredValue()
-      if (state.currentAnalyticsKeys.size > 0) {
-        const matchesMfg = state.currentAnalyticsKeys.has("Manufacturing_sum") && f.isMfg;
-        const matchesTech = state.currentAnalyticsKeys.has("Value-Add/Tech_sum") && f.isTech;
-        const matchesMro = state.currentAnalyticsKeys.has("MRO/ISS_sum") && f.isMro;
-        
-        if (!(matchesMfg || matchesTech || matchesMro)) return false;
-      } else {
-        if (!f.isDefence) return false;
-      }
-
-      // Apply the industry include/exclude filter logic
-      if (state.currentIndustries.size > 0) {
-        const includes = [...state.currentIndustries.entries()].filter(([, s]) => s === "include").map(([ind]) => ind);
-        const excludes = [...state.currentIndustries.entries()].filter(([, s]) => s === "exclude").map(([ind]) => ind);
-        if (excludes.some(ind => f.industries.has(ind))) return false;
-        if (includes.length > 0) {
-          const passes = state.industryFilterMode === "and"
-            ? includes.every(ind => f.industries.has(ind))
-            : includes.some(ind => f.industries.has(ind));
-          if (!passes) return false;
-        }
-      }
-      return true;
-    });
+    // Find all facilities in this region that pass the currently active filters.
+    // Uses the shared buildFilterPredicate() — same logic as getFilteredValue(),
+    // but was previously duplicated inline here.
+    const passesFilters = buildFilterPredicate();
+    const activeLocalFacilities = allFacilities.filter(f => f.cduid === geoId && passesFilters(f));
     
     // Summarise how many of the local facilities fall into each operation type.
     // Only include types that have at least one facility.
@@ -1328,28 +1377,8 @@
         </div>
       `);
 
-      // Append a "Close" / ✕ button to deselect the region
-      d3.select("#sidebar-header-container")
-        .append("button")
-        .attr("id", "sidebar-back")
-        .text(isMobile() ? "✕" : "CLOSE CENSUS DIVISION DETAILS")
-        .style("display", isMobile() ? "none" : null)
-        .style("font-family", "'Inter', sans-serif")
-        .style("font-size", isMobile() ? "18px" : "9px")
-        .style("font-weight", isMobile() ? "400" : "600")
-        .style("background", "transparent")
-        .style("border", isMobile() ? "none" : `1px solid ${c.accent}`)
-        .style("color", isMobile() ? c.muted : c.accent)
-        .style("padding", isMobile() ? "0 4px" : "4px 9px")
-        .style("border-radius", "4px")
-        .style("cursor", "pointer")
-        .style("white-space", "nowrap")
-        .style("transition", "all 0.2s ease")
-        .style("margin-top", "2px")
-        .style("line-height", "1")
-        .on("click", restoreMapAppearance)
-        .on("mouseenter", function() { if (!isMobile()) d3.select(this).style("background", state.isDark ? "rgba(78,204,163,0.12)" : "rgba(0,169,79,0.08)"); })
-        .on("mouseleave", function() { if (!isMobile()) d3.select(this).style("background", "transparent"); });
+      // Append the "Close" / ✕ button to deselect the region
+      buildCloseButton();
         
       return;
     }
@@ -1373,29 +1402,7 @@
     `);
 
     // Add the "Close" button to the now-rendered header container
-    d3.select("#sidebar-header-container")
-      .append("button")
-      .attr("id", "sidebar-back")
-      .text(isMobile() ? "✕" : "CLOSE CENSUS DIVISION DETAILS")
-      .style("display", isMobile() ? "none" : null)
-      .style("font-family", "'Inter', sans-serif")
-      .style("font-size", isMobile() ? "18px" : "9px")
-      .style("font-weight", isMobile() ? "400" : "600")
-      .style("background", "transparent")
-      .style("border", isMobile() ? "none" : `1px solid ${c.accent}`)
-      .style("color", isMobile() ? c.muted : c.accent)
-      .style("padding", isMobile() ? "0 4px" : "4px 9px")
-      .style("border-radius", "4px")
-      .style("cursor", "pointer")
-      .style("white-space", "nowrap")
-      .style("transition", "all 0.2s ease")
-      .style("margin-top", "2px")
-      .style("line-height", "1")
-      .on("click", restoreMapAppearance)
-      .on("mouseenter", function() { if (!isMobile()) d3.select(this).style("background", state.isDark ? "rgba(78,204,163,0.12)" : "rgba(0,169,79,0.08)"); })
-      .on("mouseleave", function() { if (!isMobile()) d3.select(this).style("background", "transparent"); });
-
-    // (Duplicate addEventListener removed — D3's .on("click") above is sufficient.)
+    buildCloseButton();
 
     // Wire up the accordion expand/collapse toggle for each operations type row.
     // Clicking a row (or pressing Enter/Space on it) shows/hides its sub-rows
@@ -1840,7 +1847,7 @@
       .style("line-height", "1.6")
       .text("Facility-level data was collected as part of a national defence facility identification project, and has been aggregated here at the Census Division level. Geographic data is based on the Statistics Canada Census Subdivision Boundary File. For more detailed data descriptions, download links, and code availability, please ")
       .append("a")
-        .attr("href", "https://github.com/riley-kemp/Defence-Map")
+        .attr("href", "https://github.com/riley-kemp/defence-map")
         .attr("target", "_blank")
         .style("color", c.accent)
         .style("text-decoration", "underline")
@@ -2071,16 +2078,26 @@
   }
 
   // ─── SECTION 20: RESIZE HANDLER ──────────────────────────────────────────
-  //  Full teardown-and-rebuild on any viewport width change (covers breakpoint
-  //  crossings and portrait↔landscape rotation). 150 ms debounce collapses the
-  //  burst of resize events fired during rotation into a single rebuild.
+  //  On viewport width changes we only do a full teardown-and-rebuild when the
+  //  mobile/desktop breakpoint is crossed (≤768 px). Simple resizes within the
+  //  same layout tier just re-apply styles and re-render the map, which is much
+  //  cheaper. 150 ms debounce collapses the burst of events during rotation.
   let _lastWidth  = window.innerWidth;
+  let _lastIsMobile = isMobile();
   let _resizeTimer = null;
 
   function _doRebuild() {
-    _lastWidth = window.innerWidth;
-    controlsDiv.selectAll("*").remove();
-    _controlsBuilt = false;
+    const nowMobile = isMobile();
+    const crossedBreakpoint = nowMobile !== _lastIsMobile;
+    _lastWidth   = window.innerWidth;
+    _lastIsMobile = nowMobile;
+
+    if (crossedBreakpoint) {
+      // Full teardown required: layout structure differs between mobile and desktop
+      controlsDiv.selectAll("*").remove();
+      _controlsBuilt = false;
+    }
+
     updateUI();
     renderMap();
   }
