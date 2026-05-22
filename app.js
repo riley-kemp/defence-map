@@ -646,7 +646,7 @@
   });
 
   // "↩" — clears all active filters (Operations + Industry)
-  const resetFiltersBtn = makeBtn("↩", "Reset all filters");
+  const resetFiltersBtn = makeBtn("⟳", "Reset all filters");
   onTap(resetFiltersBtn, function() {
     flashBtn(d3.select(this));
     clearAllFilters();
