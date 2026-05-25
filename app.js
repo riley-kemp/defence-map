@@ -344,16 +344,18 @@
   }
 
   // ─── SECTION 7: MOBILE DETECTION ─────────────────────────────────────────
-  // Returns true when the viewport is 768px wide or narrower.
-  // Used throughout to switch between mobile (bottom sheet) and desktop (sidebar) layouts.
-  const isMobile = () => Math.min(window.innerWidth, window.innerHeight) <= 768;
-  const isLandscapeMobile = () => isMobile() && window.innerWidth > window.innerHeight;
+  // Layout mode is fixed at page load and never changes during the session.
+  // This prevents the mobile/desktop layout from switching mid-use when the
+  // browser window is resized across the 768px breakpoint.
+  const _setupMobile = Math.min(window.innerWidth, window.innerHeight) <= 768;
+  const isMobile = () => _setupMobile;
+  const isLandscapeMobile = () => _setupMobile && window.innerWidth > window.innerHeight;
 
-  // Snapshot taken once at startup for use during the synchronous DOM-build phase
-  // (Sections 8–15). The viewport cannot change during setup, so calling isMobile()
-  // repeatedly there is redundant. Event handlers and resize callbacks still call
-  // isMobile() directly so they always reflect the live viewport.
-  const _setupMobile = isMobile();
+  // Returns true on desktop when the viewport is too short to comfortably
+  // display the donut chart and the Facility Operations Type accordion stacked.
+  // 680 px is enough to fit both; below that we switch to a side-by-side layout.
+  const SIDEBAR_SHORT_THRESHOLD = 680;
+  const isSidebarShort = () => !_setupMobile && window.innerHeight < SIDEBAR_SHORT_THRESHOLD;
 
   // ─── SECTION 8: DOM & LAYOUT SETUP ───────────────────────────────────────
   //  Builds the HTML structure of the whole application dynamically using D3.
@@ -1135,11 +1137,14 @@
       }
       return;
     }
-    // Desktop behaviour: animate the sidebar width and toggle the arrow icon
+    // Desktop behaviour: animate the sidebar width and toggle the arrow icon.
+    // When the viewport is short, double the sidebar width so the donut chart
+    // and Facility Operations Type accordion can sit side-by-side.
+    const effectiveWidth = isSidebarShort() ? SIDEBAR_WIDTH * 2 : SIDEBAR_WIDTH;
     if (state.sidebarOpen) {
-      sidebar.style("width", `${SIDEBAR_WIDTH}px`).style("padding", "30px 24px");
+      sidebar.style("width", `${effectiveWidth}px`).style("padding", "30px 24px");
       sidebarInnerContent.style("display", "block");
-      collapseBtn.text("◀").style("left", `${SIDEBAR_WIDTH - 16}px`); 
+      collapseBtn.text("◀").style("left", `${effectiveWidth - 16}px`);
     } else {
       sidebar.style("width", "30px").style("padding", "30px 0px");
       sidebarInnerContent.style("display", "none");
@@ -1187,7 +1192,7 @@
       const svgL = legendOverlay.append("svg")
         .attr("id", "legend-bar-svg")
         .attr("width", BAR_WIDTH)
-        .attr("height", 38)
+        .attr("height", 24)
         .style("display", "block");
 
       const grad = svgL.append("defs").append("linearGradient").attr("id", gradId);
@@ -1229,7 +1234,7 @@
       // Swatch rows
       const swatchDiv = legendOverlay.append("div")
         .attr("id", "legend-swatches")
-        .style("margin-top", isMobile() ? "6px" : "12px");
+        .style("margin-top", isMobile() ? "2px" : "4px");
 
       [
         { id: "swatch-filter", label: "No defence facilities with the current filters" },
@@ -1251,7 +1256,7 @@
       // Theme switcher button row — use D3 join so buttons persist across renders
       legendOverlay.append("div")
         .attr("id", "legend-theme-row")
-        .style("margin-top", isMobile() ? "6px" : "15px")
+        .style("margin-top", isMobile() ? "15px" : "15px")
         .style("display", "flex")
         .style("justify-content", "space-between")
         .style("gap", "4px");
@@ -1780,25 +1785,44 @@
       // Close button — attached once, never re-created
       buildCloseButton();
 
-      // ── Donut placeholder ──
-      detailsDiv.append("div").attr("id", "donut-chart").style("margin-bottom", "28px");
+      // ── Side-by-side wrapper (used when viewport is short on desktop) ──
+      // When isSidebarShort(), the donut and accordion sit in a flex row.
+      // When normal height, it falls through to a plain stacked layout.
+      const sideBySideRow = detailsDiv.append("div")
+        .attr("id", "detail-side-by-side-row")
+        .style("display", isSidebarShort() ? "flex" : "block")
+        .style("gap", isSidebarShort() ? "24px" : null)
+        .style("align-items", isSidebarShort() ? "flex-start" : null);
+
+      // Left column (donut)
+      const donutCol = sideBySideRow.append("div")
+        .attr("id", "detail-donut-col")
+        .style("flex", isSidebarShort() ? "0 0 auto" : null);
+
+      donutCol.append("div").attr("id", "donut-chart").style("margin-bottom", "28px");
+
+      // Right column (note + accordion)
+      const accordionCol = sideBySideRow.append("div")
+        .attr("id", "detail-accordion-col")
+        .style("flex", isSidebarShort() ? "1 1 0" : null)
+        .style("min-width", isSidebarShort() ? "0" : null);
 
       // ── Note ──
-      detailsDiv.append("p")
+      accordionCol.append("p")
         .attr("id", "detail-note")
         .style("font-size", "12px").style("color", c.muted)
-        .style("margin", "28px 0").style("line-height", "1.5").style("font-weight", "400")
+        .style("margin", isSidebarShort() ? "0 0 16px 0" : "28px 0").style("line-height", "1.5").style("font-weight", "400")
         .html("<b>Please note:</b> a single facility may serve multiple defence industries.");
 
       // ── Accordion section heading ──
-      detailsDiv.append("div")
+      accordionCol.append("div")
         .style("font-size", "10px").style("font-weight", "600")
         .style("letter-spacing", "1.5px").style("color", c.muted)
-        .style("margin-top", "32px").style("margin-bottom", "8px").style("text-transform", "uppercase")
+        .style("margin-top", isSidebarShort() ? "0" : "32px").style("margin-bottom", "8px").style("text-transform", "uppercase")
         .text("Facility Operations Type");
 
       // ── Accordion shell ── (rows are joined into this container)
-      detailsDiv.append("div").attr("id", "accordion-shell");
+      accordionCol.append("div").attr("id", "accordion-shell");
 
       // ── Safe-area spacer on mobile ──
       if (isMobile()) {
@@ -2622,28 +2646,42 @@
   //  same layout tier just re-apply styles and re-render the map, which is much
   //  cheaper. 150 ms debounce collapses the burst of events during rotation.
   let _lastWidth  = window.innerWidth;
+  let _lastHeight = window.innerHeight;
   let _lastIsMobile = isMobile();
+  let _lastIsSidebarShort = isSidebarShort();
   let _resizeTimer = null;
 
   function _doRebuild() {
-    const nowMobile = isMobile();
-    const crossedBreakpoint = nowMobile !== _lastIsMobile;
-    _lastWidth   = window.innerWidth;
-    _lastIsMobile = nowMobile;
+	// isMobile() is now fixed at load time, so crossedBreakpoint will never be
+	// true and the teardown block below is effectively dead code. Left in place
+	// in case the freeze is ever removed.
+	const nowMobile = isMobile();
+	const crossedBreakpoint = nowMobile !== _lastIsMobile;
+	_lastWidth   = window.innerWidth;
+	_lastHeight  = window.innerHeight;
+	_lastIsMobile = nowMobile;
 
-    if (crossedBreakpoint) {
-      // Full teardown required: layout structure differs between mobile and desktop
-      controlsDiv.selectAll("*").remove();
-      _controlsBuilt = false;
-      _detailSkeletonBuilt = false;
-    }
+	if (crossedBreakpoint) {
+		controlsDiv.selectAll("*").remove();
+		_controlsBuilt = false;
+		_detailSkeletonBuilt = false;
+		}
 
-    updateUI();
-    renderMap();
-  }
+	// When the viewport height crosses the short-sidebar threshold, the detail
+	// panel layout switches between stacked and side-by-side. Force a skeleton
+	// rebuild so the new layout takes effect immediately.
+	const nowShort = isSidebarShort();
+	if (nowShort !== _lastIsSidebarShort) {
+		_detailSkeletonBuilt = false;
+		_lastIsSidebarShort = nowShort;
+	}
+
+	updateUI();
+	renderMap();
+}
 
   window.addEventListener("resize", () => {
-    if (window.innerWidth === _lastWidth) return;
+    if (window.innerWidth === _lastWidth && window.innerHeight === _lastHeight) return;
     clearTimeout(_resizeTimer);
     _resizeTimer = setTimeout(_doRebuild, 150);
   });
