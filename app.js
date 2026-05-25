@@ -206,7 +206,11 @@
   // Cache of cduid → filtered facility count, invalidated on every filter/render change.
   // Avoids re-scanning allFacilities for every region multiple times per render.
   let _filteredValueCache = null;
-  function invalidateFilteredValueCache() { _filteredValueCache = null; }
+  // Cached predicate from the last buildFilterPredicate() call. Shared between
+  // getFilteredValue (cache builder) and updateSidebarDetail so the predicate is
+  // never constructed twice within the same render pass.
+  let _cachedPredicate = null;
+  function invalidateFilteredValueCache() { _filteredValueCache = null; _cachedPredicate = null; }
 
   // Returns how many facilities in a given region pass ALL currently active filters.
   // This number determines the colour intensity of the region on the map.
@@ -260,12 +264,14 @@
   }
 
   function getFilteredValue(feature) {
-    // Build the cache on first call within a render pass
+    // Build the cache on first call within a render pass.
+    // _cachedPredicate is stored alongside so updateSidebarDetail can reuse it
+    // without calling buildFilterPredicate() a second time.
     if (!_filteredValueCache) {
-      const passes = buildFilterPredicate();
+      _cachedPredicate = buildFilterPredicate();
       _filteredValueCache = new Map();
       for (const f of allFacilities) {
-        if (!passes(f)) continue;
+        if (!_cachedPredicate(f)) continue;
         _filteredValueCache.set(f.cduid, (_filteredValueCache.get(f.cduid) ?? 0) + 1);
       }
     }
@@ -868,8 +874,15 @@
       .attr("id", "mobile-filter-toggle")
       .text("▲  FILTERS");
     onTap(collapseBtn, () => {
-      state.sidebarOpen = !state.sidebarOpen;
+      const opening = !state.sidebarOpen;
+      state.sidebarOpen = opening;
       updateSidebarToggle();
+      // When opening via the pill, scroll back to the top of the controls so the
+      // user sees the filters rather than wherever the panel was last scrolled to.
+      if (opening) {
+        const scrollEl = sidebarInnerContent.node();
+        if (scrollEl) scrollEl.scrollTop = 0;
+      }
     });
   } else {
     // Desktop: small circular button positioned at the right edge of the sidebar.
@@ -1058,7 +1071,7 @@
 		if (!tickPending) {
 		  tickPending = true;
 		  requestAnimationFrame(() => {
-
+			tickPending = false;
 			// Re-scale vector borders so lines don't get massive when zooming in deep
 			const strokeWidth = Math.max(0.25, 1 / event.transform.k);
 			cdPaths.attr("stroke-width", strokeWidth);
@@ -1068,8 +1081,6 @@
 			  cdPaths.filter(p => p === state.selectedFeature)
 				.attr("stroke-width", strokeWidth * 2);
 			}
-
-			tickPending = false;
 		  });
 		}
 	  })
@@ -1283,6 +1294,7 @@
         .style("background",  d => d === state.currentTheme ? (state.isDark ? "rgba(78,204,163,0.1)" : "rgba(5,150,105,0.1)") : "transparent")
         .style("color",       d => d === state.currentTheme ? c.accent : c.muted)
         .style("border",      d => d === state.currentTheme ? `1px solid ${c.accent}` : `1px solid ${c.border}`)
+        .style("transform",   "scale(1)")
         .style("padding", "5px 0").style("font-size", "8.5px").style("cursor", "pointer")
         .style("border-radius", "3px").style("text-transform", "uppercase")
         .style("font-family", "'Inter', sans-serif").style("transition", "all 0.2s ease")
@@ -1377,6 +1389,7 @@
   //       coloured by facility count and wired up for hover/click interactions
   function renderMap() {
     const c = getC();
+    const _mobile = isMobile(); // capture once — used in enter handler and click handler below
     invalidateFilteredValueCache(); // Ensure counts are recomputed for current filter state
     // Get the filtered count for every region; ignore regions with zero matches
     const values = fixedData.features.map(d => getFilteredValue(d)).filter(v => v > 0);
@@ -1400,7 +1413,6 @@
     // never re-registered on subsequent filter/theme renders. Handlers read getC()
     // at event time rather than closing over the per-render `c` snapshot, which was
     // the reason they had to be re-bound every call.
-    const _mobile = isMobile(); // capture once for this render pass
     cdPaths = mapGroup.selectAll("path.cd-region")
       .data(fixedData.features)
       .join(
@@ -1439,7 +1451,13 @@
               _mousemoveRafPending = true;
               const px = event.pageX, py = event.pageY;
               requestAnimationFrame(() => {
-                tooltip.style("top", `${py + 15}px`).style("left", `${px + 15}px`);
+                // Clamp so the tooltip never overflows the right or bottom viewport edge.
+                const tipNode = tooltip.node();
+                const tipW = tipNode ? tipNode.offsetWidth  : 200;
+                const tipH = tipNode ? tipNode.offsetHeight : 50;
+                const left = Math.min(px + 15, window.innerWidth  + window.scrollX - tipW  - 8);
+                const top  = Math.min(py + 15, window.innerHeight + window.scrollY - tipH  - 8);
+                tooltip.style("top", `${top}px`).style("left", `${left}px`);
                 _mousemoveRafPending = false;
               });
             })
@@ -1459,14 +1477,21 @@
               const hoverVal = getFilteredValue(d);
               updateLegendMarker(hoverVal > 0 ? hoverVal : null, false);
               const rect = this.getBoundingClientRect();
+              const tipNode = tooltip.node();
+              const tipW = tipNode ? tipNode.offsetWidth  : 200;
+              const tipH = tipNode ? tipNode.offsetHeight : 50;
+              const rawLeft = rect.right + window.scrollX + 12;
+              const rawTop  = rect.top   + window.scrollY + rect.height / 2 - 10;
+              const left = Math.min(rawLeft, window.innerWidth  + window.scrollX - tipW  - 8);
+              const top  = Math.min(rawTop,  window.innerHeight + window.scrollY - tipH  - 8);
               tooltip
                 .style("visibility", "visible")
                 .html(`
                   <div style="color:${c.accent}; font-weight:600; font-size:14px; margin-bottom:4px;">${d.properties.CDNAME}</div>
                   <div style="font-size:11px; color:${c.muted}; font-weight:400;">${getTooltipLabel(hoverVal)}</div>
                 `)
-                .style("top",  `${rect.top  + window.scrollY + rect.height / 2 - 10}px`)
-                .style("left", `${rect.right + window.scrollX + 12}px`);
+                .style("top",  `${top}px`)
+                .style("left", `${left}px`);
             })
             .on("blur", function() {
               const c = getC();
@@ -1540,34 +1565,39 @@
 
     // ── Per-render attribute updates (runs on both enter and update) ──
     // These are data-driven and must be refreshed on every render.
+    // Snapshot the filtered counts into a new Map so that any in-flight 700ms
+    // transition always paints with the counts from *its own* render pass.
+    const _valSnapshot = new Map(_filteredValueCache);
+
+    // .attr("d", path) must run on every render — not just the first draw.
+    // Hover and click handlers call .raise() which reorders <path> elements in the
+    // DOM. D3's index-based data join would then rebind features to the wrong paths
+    // if geometry were skipped, causing regions to display another region's data.
     cdPaths
       .attr("d", path)
-      .attr("stroke", c.bg)
-      .attr("stroke-width", 0.5)
-      // Keyboard accessibility — depends on current filter state
-      .attr("tabindex", d => (getFilteredValue(d) > 0 || hasAnyData(d)) ? "0" : null)
-      .attr("role", d => (getFilteredValue(d) > 0 || hasAnyData(d)) ? "button" : null)
+      .attr("stroke", d => d === state.selectedFeature ? c.accent2 : c.bg)
+      .attr("stroke-width", d => d === state.selectedFeature ? 2 : 0.5)
+      .style("opacity", d => (state.selectedFeature && d !== state.selectedFeature) ? 0.35 : 1)
+      .attr("tabindex", d => {
+        const v = _valSnapshot.get(d._cduid) ?? 0;
+        return (v > 0 || hasAnyData(d)) ? "0" : null;
+      })
+      .attr("role", d => {
+        const v = _valSnapshot.get(d._cduid) ?? 0;
+        return (v > 0 || hasAnyData(d)) ? "button" : null;
+      })
       .attr("aria-label", d => {
-        const val = getFilteredValue(d);
+        const val = _valSnapshot.get(d._cduid) ?? 0;
         return `${d.properties.CDNAME || "Region"}, ${getTooltipLabel(val)}`;
       })
-      .style("cursor", d => (getFilteredValue(d) > 0 || hasAnyData(d)) ? "pointer" : "default");
-
-    // Animated transition: smoothly update opacity, stroke, and fill whenever
-    // the map is re-rendered (e.g. after a filter change).
-    // NOTE: this must be a separate statement from the .on() chain above.
-    // Calling .transition() in the same chain causes D3 to return a transition
-    // object instead of the selection — silently swallowing all .on() calls
-    // that follow, so no DOM event listeners would attach at all.
-    cdPaths.transition("render").duration(700)
-      .style("opacity", d => (state.selectedFeature && d !== state.selectedFeature) ? 0.35 : 1)
-      .attr("stroke", d => (d === state.selectedFeature) ? c.accent2 : c.bg)
-      .attr("stroke-width", d => (d === state.selectedFeature) ? 2 : 0.5)
+      .style("cursor", d => {
+        const v = _valSnapshot.get(d._cduid) ?? 0;
+        return (v > 0 || hasAnyData(d)) ? "pointer" : "default";
+      })
       .attr("fill", d => {
-        const val = getFilteredValue(d);
-        // Colour the region by facility count if > 0; otherwise use a grey shade
+        const val = _valSnapshot.get(d._cduid) ?? 0;
         if (val) return colourScale(val);
-        return hasAnyData(d) ? c.noData : c.noDataNone; // Two different greys for "filtered-out" vs "no data"
+        return hasAnyData(d) ? c.noData : c.noDataNone;
       });
   }
 
@@ -1628,7 +1658,10 @@
     const geoId = state.selectedFeature._cduid;
 
     // Find all facilities in this region that pass the currently active filters.
-    const passesFilters = buildFilterPredicate();
+    // Reuse _cachedPredicate built by getFilteredValue during renderMap() — if the
+    // cache is cold (e.g. detail panel opened without a preceding renderMap call)
+    // fall back to building it fresh.
+    const passesFilters = _cachedPredicate ?? buildFilterPredicate();
     const activeLocalFacilities = allFacilities.filter(f => f.cduid === geoId && passesFilters(f));
 
     // Summarise how many of the local facilities fall into each operation type.
@@ -2522,7 +2555,13 @@
     // industryFilterMode is intentionally NOT reset — it's a UX preference, not a filter
     renderMap();
     refreshControlsState();
-    if (state.selectedFeature) updateSidebarDetail();
+    if (state.selectedFeature) {
+      // Preserve scroll position so the user's place in the detail panel isn't lost
+      const scrollEl = isMobile() ? sidebarInnerContent.node() : sidebar.node();
+      const savedScroll = scrollEl ? scrollEl.scrollTop : 0;
+      updateSidebarDetail();
+      if (scrollEl) scrollEl.scrollTop = savedScroll;
+    }
     announceFilterUpdate();
   }
   
@@ -2531,7 +2570,13 @@
   function applyFilterAndCheckZoom() {
     renderMap();
     refreshControlsState();
-    if (state.selectedFeature) updateSidebarDetail();
+    if (state.selectedFeature) {
+      // Preserve scroll position so the user's place in the detail panel isn't lost
+      const scrollEl = isMobile() ? sidebarInnerContent.node() : sidebar.node();
+      const savedScroll = scrollEl ? scrollEl.scrollTop : 0;
+      updateSidebarDetail();
+      if (scrollEl) scrollEl.scrollTop = savedScroll;
+    }
     announceFilterUpdate();
   }
 
