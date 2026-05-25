@@ -171,6 +171,7 @@
     infoOpen: false,                   // Whether the "About this map" info panel is visible
     sidebarOpen: true,                 // Whether the left filter & census division information sidebar is expanded
     isPanning: false,                  // Whether the user is actively panning/dragging the map
+	isZooming: false, 				   // Whether the user is actively zooming in the map
     legendMin: 0,                      // Lowest facility count currently shown in the legend
     legendMax: 1,                      // Highest facility count currently shown in the legend
     legendColourScale: null,           // The D3 colour-scale function currently in use
@@ -334,6 +335,12 @@
   const isMobile = () => Math.min(window.innerWidth, window.innerHeight) <= 768;
   const isLandscapeMobile = () => isMobile() && window.innerWidth > window.innerHeight;
 
+  // Snapshot taken once at startup for use during the synchronous DOM-build phase
+  // (Sections 8–15). The viewport cannot change during setup, so calling isMobile()
+  // repeatedly there is redundant. Event handlers and resize callbacks still call
+  // isMobile() directly so they always reflect the live viewport.
+  const _setupMobile = isMobile();
+
   // ─── SECTION 8: DOM & LAYOUT SETUP ───────────────────────────────────────
   //  Builds the HTML structure of the whole application dynamically using D3.
   //  Nothing comes from the HTML file except the #map-container <div>.
@@ -350,7 +357,7 @@
   // handle and the floating "FILTERS" pill button for mobile.
   const btnTooltipStyle = document.createElement("style");
   btnTooltipStyle.textContent = `
-    .btn-wrap { position: relative; display: inline-flex; }
+    .btn-wrap { position: relative; display: inline-flex; border-radius: 8px; align-self: start; }
     .btn-wrap .btn-tip {
       position: absolute;
       right: calc(100% + 8px);
@@ -406,6 +413,11 @@
     /* ── Accessibility: visible focus indicators ── */
     path.cd-region:focus,
     path.cd-region:focus-visible {
+      outline: none;
+    }
+    /* Suppress the browser's default square :focus outline on control-panel buttons.
+       Keyboard users still get the green ring via :focus-visible below. */
+    #control-panel button:focus {
       outline: none;
     }
     button:focus-visible {
@@ -579,9 +591,9 @@
     .style("gap", "6px");
 
   // Button dimensions adjust slightly larger on mobile for easier touch targets
-  const btnSize   = isMobile() ? "44px" : "40px";
-  const btnPad    = isMobile() ? "10px 14px" : "8px 12px";
-  const btnFontSz = isMobile() ? "16px" : "14px";
+  const btnSize   = _setupMobile ? "44px" : "40px";
+  const btnPad    = _setupMobile ? "10px 14px" : "8px 12px";
+  const btnFontSz = _setupMobile ? "16px" : "14px";
 
   // Briefly flashes a button with the accent colour so the user gets tactile
   // feedback that their tap/click registered.
@@ -616,7 +628,9 @@
 
   // ── Individual control buttons ──
 
-  // "ⓘ" — opens/closes the "About this map" info panel
+  // "ⓘ" — opens/closes the "About this map" info panel.
+  // Uses a plain italic "i" instead of the ⓘ Unicode character, which on many
+  // platforms/fonts renders its enclosing ring as a visible square outline.
   const infoBtn = makeBtn("ⓘ", "About this map");
   onTap(infoBtn, function() {
     flashBtn(d3.select(this));
@@ -654,14 +668,14 @@
 
   // "+" / "−" — zoom buttons; hidden on mobile (users pinch-to-zoom instead)
   const zoomInBtn  = makeBtn("+", "Zoom in")
-    .style("display", isMobile() ? "none" : null)
+    .style("display", _setupMobile ? "none" : null)
     .style("font-weight", "600")
     .on("click", function() {
       flashBtn(d3.select(this));
       svg.transition().duration(350).call(zoom.scaleBy, 1.5);
     });
   const zoomOutBtn = makeBtn("−", "Zoom out")
-    .style("display", isMobile() ? "none" : null)
+    .style("display", _setupMobile ? "none" : null)
     .style("font-weight", "600")
     .on("click", function() {
       flashBtn(d3.select(this));
@@ -689,9 +703,9 @@
     .style("box-sizing", "border-box")
     .style("overflow-y", "auto")
     .style("z-index", "10")
-    .style("position", isMobile() ? "absolute" : "relative");
+    .style("position", _setupMobile ? "absolute" : "relative");
 
-  if (isMobile()) {
+  if (_setupMobile) {
     // On mobile: full-width panel anchored to the bottom of the screen,
     // initially hidden below the viewport (translateY(100%)).
     sidebar
@@ -720,10 +734,10 @@
   // at once when collapsing the sidebar without altering each child element.
   const sidebarInnerContent = sidebar.append("div")
     .style("width", "100%")
-    .style("height", isMobile() ? null : "100%")
-    .style("flex", isMobile() ? "1 1 auto" : null)
-    .style("overflow-y", isMobile() ? "auto" : null)
-    .style("padding",    isMobile() ? "0 18px 18px" : null)
+    .style("height", _setupMobile ? null : "100%")
+    .style("flex", _setupMobile ? "1 1 auto" : null)
+    .style("overflow-y", _setupMobile ? "auto" : null)
+    .style("padding",    _setupMobile ? "0 18px 18px" : null)
     .style("box-sizing", "border-box");
 
   // The collapse/expand control differs between mobile and desktop:
@@ -731,9 +745,8 @@
   //  • Desktop: a small circular ◀/▶ button at the edge of the sidebar
   let collapseBtn;
 
-  if (isMobile()) {
+  if (_setupMobile) {
     // Touch-draggable handle bar at the top of the mobile bottom sheet.
-    // A short swipe up opens it; a short swipe down closes it.
     // A very small movement (< 8px) is treated as a tap and toggles the state.
     // handleWrap sits directly inside sidebarInnerContent as its first child,
     // with position:sticky top:0 so it pins to the top of the scroll area —
@@ -778,58 +791,67 @@
         }
       });
 
-    let dragStartY  = null;
-    let dragStartH  = null;
-    let _userSetHeight = null; // last height user dragged to; null = use default
+	let dragStartY  = null;
+	let dragStartH  = null;
+	let _userSetHeight = null; // last height user dragged to; null = use default
+	let _dragRafPending = false; // Flag to throttle touchmove to one update per animation frame
 
-    const CLOSE_RATIO     = 0.35;
-    const DEFAULT_H_RATIO = 0.65;
+	const CLOSE_RATIO     = 0.35;
+	const DEFAULT_H_RATIO = 0.65;
 
-    function getMaxSheetH() {
-      const panel = document.getElementById("control-panel");
-      return panel
-        ? window.innerHeight - (panel.getBoundingClientRect().bottom + 16)
-        : window.innerHeight * 0.85;
-    }
+	function getMaxSheetH() {
+	  const panel = document.getElementById("control-panel");
+	  return panel
+		? window.innerHeight - (panel.getBoundingClientRect().bottom + 16)
+		: window.innerHeight * 0.85;
+	}
 
-    // Attach drag to the whole handleWrap for a generous ~26px touch target
-    handleWrap.on("touchstart", function(event) {
-      dragStartY = event.touches[0].clientY;
-      dragStartH = sidebar.node().getBoundingClientRect().height;
-      sidebar.style("transition", "background 0.3s ease, border 0.3s ease");
-      event.preventDefault();
-    }, { passive: false });
+	// Attach drag to the whole handleWrap for a generous ~26px touch target
+	handleWrap.on("touchstart", function(event) {
+	  dragStartY = event.touches[0].clientY;
+	  dragStartH = sidebar.node().getBoundingClientRect().height;
+	  sidebar.style("transition", "background 0.3s ease, border 0.3s ease");
+	  event.preventDefault();
+	}, { passive: false });
 
-    handleWrap.on("touchmove", function(event) {
-      if (dragStartY === null) return;
-      const dy   = event.touches[0].clientY - dragStartY;
-      const newH = Math.min(Math.max(dragStartH - dy, 40), getMaxSheetH());
-      sidebar.style("height", newH + "px");
-      event.preventDefault();
-    }, { passive: false });
+	handleWrap.on("touchmove", function(event) {
+	  if (dragStartY === null) return;
+	  if (_dragRafPending) return; // Already have a frame queued — skip this event
+	  _dragRafPending = true;
 
-    handleWrap.on("touchend", function(event) {
-      if (dragStartY === null) return;
-      const dy   = event.changedTouches[0].clientY - dragStartY;
-      const curH = sidebar.node().getBoundingClientRect().height;
-      const scrH = window.innerHeight;
-      sidebar.style("transition", "transform 0.35s ease, height 0.35s ease, background 0.3s ease, border 0.3s ease");
-      if (curH < scrH * CLOSE_RATIO) {
-        // Below threshold: forget user height, reset to default, close
-        _userSetHeight = null;
-        sidebar.style("height", (scrH * DEFAULT_H_RATIO) + "px");
-        state.sidebarOpen = false;
-        // Sliding the sheet down deselects the census division (same as pressing ✕)
-        if (state.selectedFeature) restoreMapAppearance();
-      } else {
-        // User settled at custom height — remember it
-        _userSetHeight = curH;
-        state.sidebarOpen = true;
-      }
-      dragStartY = null;
-      dragStartH = null;
-      updateSidebarToggle();
-    });
+	  const dy   = event.touches[0].clientY - dragStartY;
+	  const newH = Math.min(Math.max(dragStartH - dy, 40), getMaxSheetH());
+
+	  requestAnimationFrame(() => {
+		sidebar.style("height", newH + "px");
+		_dragRafPending = false;
+	  });
+
+	  event.preventDefault();
+	}, { passive: false });
+
+	handleWrap.on("touchend", function(event) {
+	  if (dragStartY === null) return;
+	  const curH = sidebar.node().getBoundingClientRect().height;
+	  const scrH = window.innerHeight;
+	  sidebar.style("transition", "transform 0.35s ease, height 0.35s ease, background 0.3s ease, border 0.3s ease");
+	  if (curH < scrH * CLOSE_RATIO) {
+		// Below threshold: forget user height, reset to default, close
+		_userSetHeight = null;
+		sidebar.style("height", (scrH * DEFAULT_H_RATIO) + "px");
+		state.sidebarOpen = false;
+		// Sliding the sheet down deselects the census division (same as pressing ✕)
+		if (state.selectedFeature) restoreMapAppearance();
+	  } else {
+		// User settled at custom height — remember it
+		_userSetHeight = curH;
+		state.sidebarOpen = true;
+	  }
+	  dragStartY = null;
+	  dragStartH = null;
+	  _dragRafPending = false; // Clear any pending flag on gesture end
+	  updateSidebarToggle();
+	});
 
     // Floating "▲ FILTERS" pill button at the bottom of the map.
     // Only visible when the bottom sheet is closed, giving users a clear way
@@ -883,9 +905,9 @@
     .style("position", "absolute")
     .style("top", "0")
     .style("right", "0")
-    .style("width", isMobile() ? "min(92vw, 360px)" : "300px")
+    .style("width", _setupMobile ? "min(92vw, 360px)" : "300px")
     .style("height", "100%")
-    .style("padding", isMobile() ? "24px 18px" : "30px 24px")
+    .style("padding", _setupMobile ? "24px 18px" : "30px 24px")
     .style("overflow-y", "auto")
     .style("z-index", "200")
     .style("box-shadow", "-4px 0 20px rgba(0,0,0,0.15)")
@@ -911,7 +933,7 @@
     .style("z-index", "1000");
 
   // On desktop only: show a tooltip label when hovering the collapse/expand button
-  if (!isMobile()) {
+  if (!_setupMobile) {
     collapseBtn
       .on("mouseenter.tip", function() {
         const label = state.sidebarOpen ? "Close side panel" : "Open side panel";
@@ -963,20 +985,20 @@
   // Shows the colour scale and swatch key for the choropleth.
   // On mobile the legend top matches the control panel (max(12px,...)) and its
   // Mobile legend height = 3 buttons × 44px + 2 gaps × 6px, same in both portrait and landscape
-  const _legendH = isMobile() ? "144px" : null;
+  const _legendH = _setupMobile ? "144px" : null;
   const legendOverlay = mapContainer.append("div")
     .attr("class", "legend-overlay")
     .style("position", "absolute")
-    .style("bottom", isMobile() ? null : "30px")
-    .style("top",    isMobile() ? "max(12px, env(safe-area-inset-top, 12px))" : null)
-    .style("left",   isMobile() ? "10px" : null)
-    .style("right",  isMobile() ? null   : "30px")
+    .style("bottom", _setupMobile ? null : "30px")
+    .style("top",    _setupMobile ? "max(12px, env(safe-area-inset-top, 12px))" : null)
+    .style("left",   _setupMobile ? "10px" : null)
+    .style("right",  _setupMobile ? null   : "30px")
     .style("height", _legendH)
     .style("backdrop-filter", "blur(15px)")
-    .style("padding", isMobile() ? "10px 12px" : "20px")
+    .style("padding", _setupMobile ? "10px 12px" : "20px")
     .style("border-radius", "6px")
-    .style("min-width", isMobile() ? null : "260px")
-    .style("max-width", isMobile() ? "calc(100vw - 80px)" : null)
+    .style("min-width", _setupMobile ? null : "260px")
+    .style("max-width", _setupMobile ? "calc(100vw - 80px)" : null)
     .style("box-sizing", "border-box")
     .style("overflow", "hidden");
 
@@ -1000,32 +1022,56 @@
 	  .fitExtent([[10, 20], [WIDTH - 10, HEIGHT - 110]], fixedData);
 	const path = d3.geoPath().projection(projection);
 
-  //  Define the zoom functionality.
+  // ─── SECTION 11: ZOOM AND PANNING CONFIGURATION ───────────────────────────
+
+	let tickPending = false; // Flag to check if an animation frame is already requested
+  let _mousemoveRafPending = false; // Flag to throttle tooltip repositioning on mousemove
+
 	const zoom = d3.zoom()
-	  .scaleExtent([1, 150])
+	  .scaleExtent([1, 40]) // Restrict minimum and maximum zoom factors
 	  .on("start", (event) => {
-      // Only flag as panning for genuine user interactions, not programmatic transitions.
-      // event.sourceEvent is null for zoomToFeature / zoomToFull calls.
-      if (!isMobile() && event.sourceEvent) {
-        state.isPanning = true;
-        tooltip.style("visibility", "hidden");
-      }
-    })
-	  .on("zoom", ({ transform, sourceEvent }) => {
-		mapGroup.attr("transform", transform);
-      // Hide the tooltip on every user-driven pan/zoom frame.
-      // Doing this here (not just in "start") ensures it stays hidden even if
-      // a mouseover on a path fires between mousedown and the first drag movement.
-      if (!isMobile() && sourceEvent) {
-        tooltip.style("visibility", "hidden");
-      }
+		// event.sourceEvent is null for programmatic zooms (e.g. zoomToFeature)
+		if (event.sourceEvent) {
+		  const src = event.sourceEvent.type;
+		  if (src === "mousedown" || src === "touchstart") {
+			state.isPanning = true;
+		  } else {
+			state.isZooming = true;
+		  }
+		}
+		// Instantly hide the tooltip when zooming/dragging begins
+		tooltip.style("visibility", "hidden");
 	  })
-    .on("end", (event) => {
-      if (!isMobile() && event.sourceEvent) {
-        state.isPanning = false;
-      }
-    });
-	svg.call(zoom);
+	  .on("zoom", (event) => {
+		// 1. Instantly perform the hardware-accelerated CSS transform on the SVG map group
+		mapGroup.attr("transform", event.transform);
+
+		// 2. Throttle expensive non-CSS updates (like updating stroke widths or sidebars)
+		if (!tickPending) {
+		  tickPending = true;
+		  requestAnimationFrame(() => {
+
+			// Re-scale vector borders so lines don't get massive when zooming in deep
+			const strokeWidth = Math.max(0.25, 1 / event.transform.k);
+			cdPaths.attr("stroke-width", strokeWidth);
+
+			// If a feature is highlighted, preserve its double thickness relative to the current scale
+			if (state.selectedFeature) {
+			  cdPaths.filter(p => p === state.selectedFeature)
+				.attr("stroke-width", strokeWidth * 2);
+			}
+
+			tickPending = false;
+		  });
+		}
+	  })
+	  .on("end", () => {
+		state.isZooming = false;
+		state.isPanning = false;
+	  });
+
+  // Attach the zoom behavior to the SVG canvas
+  svg.call(zoom);
 
   //  When provided a feature (i.e. a census division is pressed), calculate and provide the map position to zoom into.
 	function zoomToFeature(feature) {
@@ -1341,147 +1387,163 @@
     // The result is stored in the module-level cdPaths variable so all other functions
     // (click handler, restoreMapAppearance, keyboard handler) can reuse it without
     // issuing a new selectAll("path.cd-region") DOM query.
+    //
+    // Event handlers (hover, click, focus) are attached ONLY on enter so they are
+    // never re-registered on subsequent filter/theme renders. Handlers read getC()
+    // at event time rather than closing over the per-render `c` snapshot, which was
+    // the reason they had to be re-bound every call.
+    const _mobile = isMobile(); // capture once for this render pass
     cdPaths = mapGroup.selectAll("path.cd-region")
       .data(fixedData.features)
-      .join("path")
-        .attr("class", "cd-region")
-        .attr("d", path)                          // Converts GeoJSON geometry → SVG path string
-        .attr("stroke", c.bg)                     // Region border colour matches background (subtle)
-        .attr("stroke-width", 0.5)
-        .attr("vector-effect", "non-scaling-stroke") // Keep border width constant regardless of zoom level
+      .join(
+        // ── Enter: create paths and attach all event handlers exactly once ──
+        enter => {
+          const p = enter.append("path")
+            .attr("class", "cd-region")
+            .attr("vector-effect", "non-scaling-stroke"); // Keep border width constant regardless of zoom level
 
-        // ── Keyboard accessibility ──
-        // Only regions with data are keyboard-navigable; others are hidden from tab order.
-        .attr("tabindex", d => (getFilteredValue(d) > 0 || hasAnyData(d)) ? "0" : null)
-        .attr("role", d => (getFilteredValue(d) > 0 || hasAnyData(d)) ? "button" : null)
-        .attr("aria-label", d => {
-          const val = getFilteredValue(d);
-          return `${d.properties.CDNAME || "Region"}, ${getTooltipLabel(val)}`;
-        })
-
-        // Only show a pointer cursor over regions that have data
-        .style("cursor", d => (getFilteredValue(d) > 0 || hasAnyData(d)) ? "pointer" : "default")
-
-	// ── Hover interactions (desktop only — mobile uses tap) ──
-        .on("mouseover", isMobile() ? null : function(event, d) {
-          if (state.isPanning) return; // suppress tooltip during pan/drag
-          state.hoveredFeature = d;
-          if (state._hoveredEl && state._hoveredEl !== this) {
-            const prev = d3.select(state._hoveredEl);
-            if (prev.attr("stroke") !== c.accent2) prev.attr("stroke", c.bg).attr("stroke-width", 0.5);
-          }
-          state._hoveredEl = this;
-          d3.select(this).attr("stroke", c.text).attr("stroke-width", 1).raise();
-          const hoverVal = getFilteredValue(d);
-          updateLegendMarker(hoverVal > 0 ? hoverVal : null, false);
-          tooltip.style("visibility", "visible").html(`
-            <div style="color:${c.accent}; font-weight:600; font-size:14px; margin-bottom:4px;">${d.properties.CDNAME}</div>
-            <div style="font-size:11px; color:${c.muted}; font-weight:400;">${getTooltipLabel(getFilteredValue(d))}</div>
-          `);
-        })
-        // Tooltip follows the mouse as it moves
-        .on("mousemove", isMobile() ? null : (() => {
-          // Throttle to one reposition per animation frame (~60 fps max).
-          // Without this, mousemove fires on every pixel and queues redundant style writes.
-          let _rafPending = false;
-          return function(event) {
-            if (state.isPanning) return; // don't reposition tooltip during pan/drag
-            if (_rafPending) return;
-            _rafPending = true;
-            const px = event.pageX, py = event.pageY;
-            requestAnimationFrame(() => {
-              tooltip.style("top", `${py - 10}px`).style("left", `${px + 20}px`);
-              _rafPending = false;
-            });
-          };
-        })())
-        .on("mouseleave", isMobile() ? null : function() {
-          state.hoveredFeature = null;
-          state._hoveredEl = null;
-          const sel = d3.select(this);
-          if (sel.attr("stroke") !== c.accent2) sel.attr("stroke", c.bg).attr("stroke-width", 0.5);
-          clearLegendMarker();
-          tooltip.style("visibility", "hidden");
-        })
-
-        // ── Keyboard focus: show tooltip at element centre (desktop only) ──
-        .on("focus", isMobile() ? null : function(event, d) {
-          d3.select(this).attr("stroke", c.text).attr("stroke-width", 1).raise();
-          const hoverVal = getFilteredValue(d);
-          updateLegendMarker(hoverVal > 0 ? hoverVal : null, false);
-          const rect = this.getBoundingClientRect();
-          tooltip
-            .style("visibility", "visible")
-            .html(`
-              <div style="color:${c.accent}; font-weight:600; font-size:14px; margin-bottom:4px;">${d.properties.CDNAME}</div>
-              <div style="font-size:11px; color:${c.muted}; font-weight:400;">${getTooltipLabel(hoverVal)}</div>
-            `)
-            .style("top",  `${rect.top  + window.scrollY + rect.height / 2 - 10}px`)
-            .style("left", `${rect.right + window.scrollX + 12}px`);
-        })
-        .on("blur", isMobile() ? null : function() {
-          const sel = d3.select(this); if (sel.attr("stroke") !== c.accent2) sel.attr("stroke", c.bg).attr("stroke-width", 0.5);
-          clearLegendMarker();
-          tooltip.style("visibility", "hidden");
-        })
-
-        // ── Click / tap interaction ──
-        .on("click", function(event, d) {
-          event.stopPropagation(); // Prevent click from bubbling up to the SVG background
-          
-          // Clicking a region with no data clears any existing selection
-          if (!hasAnyData(d)) { restoreMapAppearance(); return; }
-
-          // Reset the skeleton flag whenever the selected region changes so
-          // buildCloseButton() creates a fresh button rather than appending a
-          // duplicate into an existing #sidebar-header-container.
-          if (state.selectedFeature !== d) _detailSkeletonBuilt = false;
-          
-          state.selectedFeature = d;
-          const selVal = getFilteredValue(d);
-          // Pin the legend marker at this region's position
-          updateLegendMarker(selVal > 0 ? selVal : null, true);
-          
-          // Ensure the sidebar is open to show the detail panel
-          if(!state.sidebarOpen) {
-            state.sidebarOpen = true;
-            updateSidebarToggle();
-          }
-
-          // Interrupt all in-flight transitions on every path before applying the
-          // new selection state. Named interrupt("render") only cancels the render
-          // transition; calling interrupt() with no argument cancels everything,
-          // including the restoreMapAppearance transition and any rAF-pending frames
-          // that haven't committed yet. This prevents any in-flight animation from
-          // overwriting the opacity/stroke values set below.
-          cdPaths.interrupt();
-
-          // Dim all regions and reset all strokes — including stroke-width — so
-          // previously selected regions don't keep their thick border.
-          cdPaths.style("opacity", 0.35).attr("stroke", c.bg).attr("stroke-width", 0.5);
-          d3.select(this).style("opacity", 1).attr("stroke", c.accent2).attr("stroke-width", 2).raise();
-          
-          zoomToFeature(d);       // Animate the map zooming in on the selected region
-
-          updateSidebarDetail();
-
-          if (isMobile()) {
-            // Scroll immediately after layout settles.
-            setTimeout(() => {
-              const scrollEl = sidebarInnerContent.node();
-              if (scrollEl) {
-                const scrollTop = detailsDiv.node().offsetTop - sidebarInnerContent.node().offsetTop;
-                scrollEl.scrollTo({ top: scrollTop, behavior: "smooth" });
+          // ── Hover interactions (desktop only — mobile uses tap) ──
+          if (!_mobile) {
+            p.on("mouseover", function(event, d) {
+              if (state.isZooming || state.isPanning) return;
+              const c = getC();
+              state.hoveredFeature = d;
+              if (state._hoveredEl && state._hoveredEl !== this) {
+                const prev = d3.select(state._hoveredEl);
+                if (prev.attr("stroke") !== c.accent2) prev.attr("stroke", c.bg).attr("stroke-width", 0.5);
               }
-            }, 50);
-          } else {
-            // Scroll the sidebar so the census division name is visible near the top.
-            setTimeout(() => {
-              const scrollEl = sidebar.node();
-              if (scrollEl) scrollEl.scrollTo({ top: detailsDiv.node().offsetTop - 16, behavior: "smooth" });
-            }, 50);
+              state._hoveredEl = this;
+              d3.select(this).attr("stroke", c.text).attr("stroke-width", 1).raise();
+              const hoverVal = getFilteredValue(d);
+              updateLegendMarker(hoverVal > 0 ? hoverVal : null, false);
+              tooltip.style("visibility", "visible").html(`
+                <div style="color:${c.accent}; font-weight:600; font-size:14px; margin-bottom:4px;">${d.properties.CDNAME}</div>
+                <div style="font-size:11px; color:${c.muted}; font-weight:400;">${getTooltipLabel(getFilteredValue(d))}</div>
+              `);
+            })
+            .on("mousemove", function(event) {
+              // Throttle to one reposition per animation frame (~60 fps max).
+              if (state.isZooming || state.isPanning) {
+                tooltip.style("visibility", "hidden");
+                return;
+              }
+              if (_mousemoveRafPending) return;
+              _mousemoveRafPending = true;
+              const px = event.pageX, py = event.pageY;
+              requestAnimationFrame(() => {
+                tooltip.style("top", `${py + 15}px`).style("left", `${px + 15}px`);
+                _mousemoveRafPending = false;
+              });
+            })
+            .on("mouseleave", function() {
+              const c = getC();
+              state.hoveredFeature = null;
+              state._hoveredEl = null;
+              const sel = d3.select(this);
+              if (sel.attr("stroke") !== c.accent2) sel.attr("stroke", c.bg).attr("stroke-width", 0.5);
+              clearLegendMarker();
+              tooltip.style("visibility", "hidden");
+            })
+            // ── Keyboard focus: show tooltip at element centre (desktop only) ──
+            .on("focus", function(event, d) {
+              const c = getC();
+              d3.select(this).attr("stroke", c.text).attr("stroke-width", 1).raise();
+              const hoverVal = getFilteredValue(d);
+              updateLegendMarker(hoverVal > 0 ? hoverVal : null, false);
+              const rect = this.getBoundingClientRect();
+              tooltip
+                .style("visibility", "visible")
+                .html(`
+                  <div style="color:${c.accent}; font-weight:600; font-size:14px; margin-bottom:4px;">${d.properties.CDNAME}</div>
+                  <div style="font-size:11px; color:${c.muted}; font-weight:400;">${getTooltipLabel(hoverVal)}</div>
+                `)
+                .style("top",  `${rect.top  + window.scrollY + rect.height / 2 - 10}px`)
+                .style("left", `${rect.right + window.scrollX + 12}px`);
+            })
+            .on("blur", function() {
+              const c = getC();
+              const sel = d3.select(this);
+              if (sel.attr("stroke") !== c.accent2) sel.attr("stroke", c.bg).attr("stroke-width", 0.5);
+              clearLegendMarker();
+              tooltip.style("visibility", "hidden");
+            });
           }
-        });
+
+          // ── Click / tap interaction (all devices) ──
+          p.on("click", function(event, d) {
+            event.stopPropagation();
+            const c = getC();
+
+            if (!hasAnyData(d)) { restoreMapAppearance(); return; }
+
+            // Reset the skeleton flag whenever the selected region changes so
+            // buildCloseButton() creates a fresh button rather than appending a
+            // duplicate into an existing #sidebar-header-container.
+            if (state.selectedFeature !== d) _detailSkeletonBuilt = false;
+
+            state.selectedFeature = d;
+            const selVal = getFilteredValue(d);
+            // Pin the legend marker at this region's position
+            updateLegendMarker(selVal > 0 ? selVal : null, true);
+
+            // Ensure the sidebar is open to show the detail panel
+            if (!state.sidebarOpen) {
+              state.sidebarOpen = true;
+              updateSidebarToggle();
+            }
+
+            // Interrupt all in-flight transitions on every path before applying the
+            // new selection state. Named interrupt("render") only cancels the render
+            // transition; calling interrupt() with no argument cancels everything,
+            // including the restoreMapAppearance transition and any rAF-pending frames
+            // that haven't committed yet. This prevents any in-flight animation from
+            // overwriting the opacity/stroke values set below.
+            cdPaths.interrupt();
+
+            // Dim all regions and reset all strokes — including stroke-width — so
+            // previously selected regions don't keep their thick border.
+            cdPaths.style("opacity", 0.35).attr("stroke", c.bg).attr("stroke-width", 0.5);
+            d3.select(this).style("opacity", 1).attr("stroke", c.accent2).attr("stroke-width", 2).raise();
+
+            zoomToFeature(d);
+            updateSidebarDetail();
+
+            if (isMobile()) {
+              setTimeout(() => {
+                const scrollEl = sidebarInnerContent.node();
+                if (scrollEl) {
+                  const scrollTop = detailsDiv.node().offsetTop - sidebarInnerContent.node().offsetTop;
+                  scrollEl.scrollTo({ top: scrollTop, behavior: "smooth" });
+                }
+              }, 50);
+            } else {
+              setTimeout(() => {
+                const scrollEl = sidebar.node();
+                if (scrollEl) scrollEl.scrollTo({ top: detailsDiv.node().offsetTop - 16, behavior: "smooth" });
+              }, 50);
+            }
+          });
+
+          return p;
+        },
+        // ── Update: reuse existing paths — handlers already attached ──
+        update => update
+      );
+
+    // ── Per-render attribute updates (runs on both enter and update) ──
+    // These are data-driven and must be refreshed on every render.
+    cdPaths
+      .attr("d", path)
+      .attr("stroke", c.bg)
+      .attr("stroke-width", 0.5)
+      // Keyboard accessibility — depends on current filter state
+      .attr("tabindex", d => (getFilteredValue(d) > 0 || hasAnyData(d)) ? "0" : null)
+      .attr("role", d => (getFilteredValue(d) > 0 || hasAnyData(d)) ? "button" : null)
+      .attr("aria-label", d => {
+        const val = getFilteredValue(d);
+        return `${d.properties.CDNAME || "Region"}, ${getTooltipLabel(val)}`;
+      })
+      .style("cursor", d => (getFilteredValue(d) > 0 || hasAnyData(d)) ? "pointer" : "default");
 
     // Animated transition: smoothly update opacity, stroke, and fill whenever
     // the map is re-rendered (e.g. after a filter change).
@@ -1642,10 +1704,10 @@
       msgBox.append("p")
         .style("color", c.accent).style("font-size", "14px").style("font-weight", "600")
         .style("margin", "0 0 6px 0")
-        .text("No facilities match active filters in this region.");
+        .text("No facilities match active filters in this census division.");
       msgBox.append("p")
         .style("color", c.muted).style("font-size", "12px").style("margin", "0").style("line-height", "1.4")
-        .text("Try adjusting or resetting your operations and industry filters to see the regional capabilities.");
+        .text("Try adjusting or resetting your operations and industry filters to see the divisional capabilities.");
       return;
     }
 
@@ -1729,7 +1791,8 @@
             .style("display", "flex").style("justify-content", "space-between")
             .style("align-items", "center").style("padding", "12px 0")
             .style("font-size", "12px").style("font-family", "'Inter', sans-serif")
-            .style("user-select", "none");
+            .style("user-select", "none")
+            .style("-webkit-tap-highlight-color", "transparent"); // suppress blue flash on Chrome mobile
 
           toggleDiv.append("span")
             .attr("class", "accordion-label")
@@ -1789,12 +1852,17 @@
         const chevron = row.select(".accordion-chevron");
         chevron.style("display", hasBreakdown ? "inline-block" : "none").style("color", c.accent);
 
-        // Rebuild sub-rows (counts may have changed with filter update)
+        // Rebuild sub-rows (counts may have changed with filter update).
+        // Preserve open/close state unless the breakdown has disappeared entirely —
+        // collapsing an expanded row the user is reading on every filter change is disruptive.
         const subContainer = row.select(".accordion-sub-rows");
-        // Reset open state when data changes (counts changed = new filter applied)
-        subContainer.style("display", "none");
-        chevron.style("transform", "rotate(0deg)");
-        toggleDiv.attr("aria-expanded", "false");
+        const wasOpen = subContainer.style("display") !== "none";
+        if (!hasBreakdown && wasOpen) {
+          // Breakdown gone: close and reset
+          subContainer.style("display", "none");
+          chevron.style("transform", "rotate(0deg)");
+          toggleDiv.attr("aria-expanded", "false");
+        }
 
         subContainer.selectAll(".sub-row")
           .data(subData, d => d.label)
@@ -1964,10 +2032,20 @@
     logoLink.append("img")
       .attr("id", "logo-img")
       .attr("src", logoUrl)
-      .style("height", isMobile() ? "40px" : "70px")
+      .style("height", _setupMobile ? "40px" : "70px")
       .style("width", "auto")
       .style("object-fit", "contain")
-      .on("error", function() { d3.select(this).style("display", "none"); }); // Silently hide if image fails to load
+      .on("error", function() {
+        // Hide the broken image and show a text fallback so the sidebar header
+        // isn't silently blank if the remote SVG fails to load.
+        d3.select(this).style("display", "none");
+        logoLink.append("span")
+          .style("font-family", "'Inter', sans-serif")
+          .style("font-size", _setupMobile ? "16px" : "20px")
+          .style("font-weight", "600")
+          .style("color", getC().accent)
+          .text("Trillium");
+      });
 
     // ── Page title ──
     controlsDiv.append("h2")
@@ -1992,7 +2070,7 @@
       .style("letter-spacing", "1.5px")
       .style("color", c.muted);
 
-    analyticsHeader.append("button")
+    const resetAnalyticsBtn = analyticsHeader.append("button")
       .attr("id", "reset-analytics-btn")
       .text("RESET OPERATIONS FILTERS")
       .style("font-family", "'Inter', sans-serif")
@@ -2002,12 +2080,11 @@
       .style("padding", "4px 9px")
       .style("border-radius", "4px")
       .style("transition", "all 0.2s ease")
-      .on("touchend", (event) => { event.preventDefault(); state.currentAnalyticsKeys.clear(); applyFilterAndCheckZoom(); })
-      .on("click", (event) => { if (event.pointerType === "touch") return; state.currentAnalyticsKeys.clear(); applyFilterAndCheckZoom(); })
       .on("mouseenter", function() {
         if (state.currentAnalyticsKeys.size > 0) d3.select(this).style("background", state.isDark ? "rgba(78,204,163,0.12)" : "rgba(0,169,79,0.08)");
       })
       .on("mouseleave", function() { d3.select(this).style("background", "transparent"); });
+    onTap(resetAnalyticsBtn, () => { state.currentAnalyticsKeys.clear(); applyFilterAndCheckZoom(); });
 
     // ── Operations filter "chips" (pill buttons) ──
     // One chip per operation type. Clicking toggles that type on/off.
@@ -2022,31 +2099,17 @@
 
     Object.entries(OPERATIONS_MAP).forEach(([key, label]) => {
       if (key === "General_Count_sum") return; // Skip the "all" entry
-      analyticsContainer.append("button")
+      const chip = analyticsContainer.append("button")
         .attr("data-ops-key", key)   // Store the key as a data attribute for event handlers to read
         .attr("data-label", label)
         .attr("aria-pressed", "false")
         .style("font-family", "'Inter', sans-serif")
-        .style("font-size", isMobile() ? "12px" : "10px")
+        .style("font-size", _setupMobile ? "12px" : "10px")
         .style("font-weight", "500")
         .style("letter-spacing", "0.3px")
-        .style("padding", isMobile() ? "8px 14px" : "5px 10px")
+        .style("padding", _setupMobile ? "8px 14px" : "5px 10px")
         .style("border-radius", "20px")
         .style("cursor", "pointer")
-        .on("touchend", function(event) {
-          event.preventDefault();
-          const k = this.getAttribute("data-ops-key");
-          if (state.currentAnalyticsKeys.has(k)) state.currentAnalyticsKeys.delete(k);
-          else state.currentAnalyticsKeys.add(k);
-          applyFilterAndCheckZoom();
-        })
-        .on("click", function(event) {
-          if (event.pointerType === "touch") return;
-          const k = this.getAttribute("data-ops-key");
-          if (state.currentAnalyticsKeys.has(k)) state.currentAnalyticsKeys.delete(k);
-          else state.currentAnalyticsKeys.add(k);
-          applyFilterAndCheckZoom();
-        })
         .on("mouseenter", function() {
           const k = this.getAttribute("data-ops-key");
           if (!state.currentAnalyticsKeys.has(k)) d3.select(this).style("border", `1px solid ${getC().accent}`).style("color", getC().accent);
@@ -2058,6 +2121,12 @@
             d3.select(this).style("border", `1px solid ${cc.border}`).style("color", cc.muted);
           }
         });
+      onTap(chip, function() {
+        const k = this.getAttribute("data-ops-key");
+        if (state.currentAnalyticsKeys.has(k)) state.currentAnalyticsKeys.delete(k);
+        else state.currentAnalyticsKeys.add(k);
+        applyFilterAndCheckZoom();
+      });
     });
 
     // ── Industry Filters section header + AND/OR toggle + reset button ──
@@ -2083,7 +2152,7 @@
       .style("gap", "2px");
 
     ["and", "or"].forEach(mode => {
-      modeToggleDiv.append("button")
+      const btn = modeToggleDiv.append("button")
         .attr("data-mode", mode)
         .text(mode.toUpperCase())
         .style("font-family", "'Inter', sans-serif")
@@ -2093,20 +2162,14 @@
         .style("border-radius", "3px")
         .style("cursor", "pointer")
         .style("letter-spacing", "0.5px")
-        .style("transition", "all 0.15s ease")
-        .on("touchend", function(event) {
-          event.preventDefault();
-          state.industryFilterMode = this.getAttribute("data-mode");
-          applyFilterAndCheckZoom();
-        })
-        .on("click", function(event) {
-          if (event.pointerType === "touch") return;
-          state.industryFilterMode = this.getAttribute("data-mode");
-          applyFilterAndCheckZoom();
-        });
+        .style("transition", "all 0.15s ease");
+      onTap(btn, function() {
+        state.industryFilterMode = this.getAttribute("data-mode");
+        applyFilterAndCheckZoom();
+      });
     });
 
-    filterHeader.append("button")
+    const resetIndustryBtn = filterHeader.append("button")
       .attr("id", "reset-industry-btn")
       .text("RESET INDUSTRY FILTERS")
       .style("font-family", "'Inter', sans-serif")
@@ -2116,12 +2179,11 @@
       .style("padding", "4px 9px")
       .style("border-radius", "4px")
       .style("transition", "all 0.2s ease")
-      .on("touchend", (event) => { event.preventDefault(); state.currentIndustries.clear(); applyFilterAndCheckZoom(); })
-      .on("click", (event) => { if (event.pointerType === "touch") return; state.currentIndustries.clear(); applyFilterAndCheckZoom(); })
       .on("mouseenter", function() {
         if (state.currentIndustries.size > 0) d3.select(this).style("background", state.isDark ? "rgba(78,204,163,0.12)" : "rgba(0,169,79,0.08)");
       })
       .on("mouseleave", function() { d3.select(this).style("text-decoration", "none").style("background", "transparent"); });
+    onTap(resetIndustryBtn, () => { state.currentIndustries.clear(); applyFilterAndCheckZoom(); });
 
 
     // ── Industry filter chips ──
@@ -2134,36 +2196,17 @@
       .style("gap", "6px");
 
     Object.entries(INDUSTRY_KEYS).forEach(([key, label]) => {
-      chipContainer.append("button")
+      const chip = chipContainer.append("button")
         .attr("data-ind-key", key)
         .attr("data-label", label)
         .attr("aria-pressed", "false")
         .style("font-family", "'Inter', sans-serif")
-        .style("font-size", isMobile() ? "12px" : "10px")
+        .style("font-size", _setupMobile ? "12px" : "10px")
         .style("font-weight", "500")
         .style("letter-spacing", "0.3px")
-        .style("padding", isMobile() ? "8px 14px" : "5px 10px")
+        .style("padding", _setupMobile ? "8px 14px" : "5px 10px")
         .style("border-radius", "20px")
         .style("cursor", "pointer")
-        .on("touchend", function(event) {
-          event.preventDefault();
-          const k = this.getAttribute("data-ind-key");
-          const cur = state.currentIndustries.get(k);
-          if (!cur)                  state.currentIndustries.set(k, "include");
-          else if (cur === "include") state.currentIndustries.set(k, "exclude");
-          else                       state.currentIndustries.delete(k);
-          applyFilterAndCheckZoom();
-        })
-        .on("click", function(event) {
-          if (event.pointerType === "touch") return;
-          const k = this.getAttribute("data-ind-key");
-          const cur = state.currentIndustries.get(k);
-          // Cycle: not set → include → exclude → remove
-          if (!cur)                  state.currentIndustries.set(k, "include");
-          else if (cur === "include") state.currentIndustries.set(k, "exclude");
-          else                       state.currentIndustries.delete(k);
-          applyFilterAndCheckZoom();
-        })
         .on("mouseenter", function() {
           const k = this.getAttribute("data-ind-key");
           if (!state.currentIndustries.has(k)) {
@@ -2178,6 +2221,15 @@
             d3.select(this).style("border", `1px solid ${cc.border}`).style("color", cc.muted);
           }
         });
+      onTap(chip, function() {
+        const k = this.getAttribute("data-ind-key");
+        const cur = state.currentIndustries.get(k);
+        // Cycle: not set → include → exclude → remove
+        if (!cur)                   state.currentIndustries.set(k, "include");
+        else if (cur === "include")  state.currentIndustries.set(k, "exclude");
+        else                        state.currentIndustries.delete(k);
+        applyFilterAndCheckZoom();
+      });
     });
 
     // ── "Reset All Filters" button ──
@@ -2185,10 +2237,10 @@
     const clearAllRow = controlsDiv.append("div")
       .style("display", "flex")
       .style("justify-content", "flex-end")
-      .style("margin-top", isMobile() ? "14px" : "6px")
+      .style("margin-top", _setupMobile ? "14px" : "6px")
       .style("margin-bottom", "18px");
 
-    clearAllRow.append("button")
+    const resetAllBtn = clearAllRow.append("button")
       .attr("id", "reset-all-btn")
       .text("RESET ALL FILTERS")
       .style("font-family", "'Inter', sans-serif")
@@ -2199,13 +2251,12 @@
       .style("border-radius", "4px")
       .style("transition", "all 0.2s ease")
       .style("letter-spacing", "0.8px")
-      .on("touchend", (event) => { event.preventDefault(); clearAllFilters(); })
-      .on("click", (event) => { if (event.pointerType === "touch") return; clearAllFilters(); })
       .on("mouseenter", function() {
         const either = state.currentAnalyticsKeys.size > 0 || state.currentIndustries.size > 0;
         if (either) d3.select(this).style("background", state.isDark ? "rgba(78,204,163,0.12)" : "rgba(0,169,79,0.08)");
       })
       .on("mouseleave", function() { d3.select(this).style("background", "transparent"); });
+    onTap(resetAllBtn, () => clearAllFilters());
 
     // ── "About this map" info panel content ──
     // Populated once here; the panel slides in/out via the ⓘ button.
@@ -2225,7 +2276,7 @@
       .text("ABOUT THIS MAP");
 
     // Close button inside the info panel
-    infoHeader.append("button")
+    const infoCloseBtn = infoHeader.append("button")
       .text("✕")
       .style("background", "transparent")
       .style("border", `1px solid ${c.border}`)
@@ -2234,9 +2285,8 @@
       .style("font-size", "12px")
       .style("padding", "4px 8px")
       .style("border-radius", "4px")
-      .style("font-family", "'Inter', sans-serif")
-      .on("touchend", (event) => { event.preventDefault(); state.infoOpen = false; infoSidebar.style("transform", "translateX(100%)"); })
-      .on("click", (event) => { if (event.pointerType === "touch") return; state.infoOpen = false; infoSidebar.style("transform", "translateX(100%)"); });
+      .style("font-family", "'Inter', sans-serif");
+    onTap(infoCloseBtn, () => { state.infoOpen = false; infoSidebar.style("transform", "translateX(100%)"); });
 
     infoModal.append("h3")
       .style("font-size", "20px")
