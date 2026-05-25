@@ -722,15 +722,27 @@
   const sidebar = mainWrapper.append("div")
     .style("box-sizing", "border-box")
     .style("overflow-y", "auto")
-    .style("z-index", "10")
+    .style("z-index", _setupMobile ? "110" : "10")
     .style("position", _setupMobile ? "absolute" : "relative");
+
+  const CLOSE_RATIO      = 0.35;
+  const FULLSCREEN_RATIO = 0.70; // drag above this fraction of viewport → snap to top
+  // Default open height: shorter in landscape so the map stays usable
+  const DEFAULT_H_RATIO  = () => isLandscapeMobile() ? 0.50 : 0.60;
+
+  // Full height: reaches the top of the screen, just inside the safe area.
+  // The sheet sits above the control panel buttons (z-index raised to 110).
+  function getMaxSheetH() {
+    const safeTop = 12; // mirrors the control panel's top offset
+    return window.innerHeight - safeTop;
+  }
 
   if (_setupMobile) {
     // On mobile: full-width panel anchored to the bottom of the screen,
     // initially hidden below the viewport (translateY(100%)).
     sidebar
       .style("width", "100%")
-      .style("height", "60vh")
+      .style("height", (window.innerHeight * DEFAULT_H_RATIO()) + "px")
       .style("bottom", "0")
       .style("left", "0")
       .style("padding", "0")
@@ -764,6 +776,14 @@
   //  • Mobile:  a drag handle bar at the top of the bottom sheet
   //  • Desktop: a small circular ◀/▶ button at the edge of the sidebar
   let collapseBtn;
+
+  // Mobile bottom-sheet drag state — hoisted here so updateSidebarToggle,
+  // restoreMapAppearance, and the ✕ handler can all access them.
+  let dragStartY      = null;
+  let dragStartH      = null;
+  let _userSetHeight  = null;  // last height user dragged to; null = use default
+  let _isFullscreen   = false; // true when sheet is snapped to full height
+  let _dragRafPending = false;
 
   if (_setupMobile) {
     // Touch-draggable handle bar at the top of the mobile bottom sheet.
@@ -806,25 +826,12 @@
         if (state.selectedFeature) {
           restoreMapAppearance();
         } else {
+          _isFullscreen = false;
           state.sidebarOpen = false;
           updateSidebarToggle();
         }
       });
 
-	let dragStartY  = null;
-	let dragStartH  = null;
-	let _userSetHeight = null; // last height user dragged to; null = use default
-	let _dragRafPending = false; // Flag to throttle touchmove to one update per animation frame
-
-	const CLOSE_RATIO     = 0.35;
-	const DEFAULT_H_RATIO = 0.65;
-
-	function getMaxSheetH() {
-	  const panel = document.getElementById("control-panel");
-	  return panel
-		? window.innerHeight - (panel.getBoundingClientRect().bottom + 16)
-		: window.innerHeight * 0.85;
-	}
 
 	// Attach drag to the whole handleWrap for a generous ~26px touch target
 	handleWrap.on("touchstart", function(event) {
@@ -856,14 +863,22 @@
 	  const scrH = window.innerHeight;
 	  sidebar.style("transition", "transform 0.35s ease, height 0.35s ease, background 0.3s ease, border 0.3s ease");
 	  if (curH < scrH * CLOSE_RATIO) {
-		// Below threshold: forget user height, reset to default, close
+		// Below close threshold: forget user height, reset to default, close
 		_userSetHeight = null;
-		sidebar.style("height", (scrH * DEFAULT_H_RATIO) + "px");
+		_isFullscreen  = false;
+		sidebar.style("height", (scrH * DEFAULT_H_RATIO()) + "px");
 		state.sidebarOpen = false;
 		// Sliding the sheet down deselects the census division (same as pressing ✕)
 		if (state.selectedFeature) restoreMapAppearance();
+	  } else if (curH >= scrH * FULLSCREEN_RATIO) {
+		// Above fullscreen threshold: snap to top
+		_isFullscreen  = true;
+		_userSetHeight = null;
+		sidebar.style("height", getMaxSheetH() + "px");
+		state.sidebarOpen = true;
 	  } else {
 		// User settled at custom height — remember it
+		_isFullscreen  = false;
 		_userSetHeight = curH;
 		state.sidebarOpen = true;
 	  }
@@ -1124,8 +1139,10 @@
     if (isMobile()) {
       const c = getC();
       if (state.sidebarOpen) {
-        sidebar.style("height", (typeof _userSetHeight === "number"
-          ? _userSetHeight : (window.innerHeight * 0.60)) + "px");
+        const h = _isFullscreen
+          ? getMaxSheetH()
+          : (typeof _userSetHeight === "number" ? _userSetHeight : (window.innerHeight * DEFAULT_H_RATIO()));
+        sidebar.style("height", h + "px");
         sidebar.style("transform", "translateY(0)");
         d3.select("#mobile-filter-toggle").style("display", "none");
       } else {
@@ -1815,11 +1832,13 @@
         .style("margin", isSidebarShort() ? "0" : "28px 0").style("line-height", "1.5").style("font-weight", "400")
         .html("<b>Please note:</b> a single facility may serve multiple defence industries.");
 
-      // Right column (accordion only)
+      // Right column (accordion only) — border-left acts as the vertical divider
       const accordionCol = sideBySideRow.append("div")
         .attr("id", "detail-accordion-col")
         .style("flex", isSidebarShort() ? "1 1 0" : null)
-        .style("min-width", isSidebarShort() ? "0" : null);
+        .style("min-width", isSidebarShort() ? "0" : null)
+        .style("border-left", isSidebarShort() ? `1px solid ${c.border}` : null)
+        .style("padding-left", isSidebarShort() ? "20px" : null);
 
       // ── Accordion section heading ──
       accordionCol.append("div")
@@ -2666,6 +2685,7 @@
       .attr("stroke-width", 0.5);
     // On mobile, close the bottom sheet when a region is deselected
     if (isMobile()) {
+      _isFullscreen = false;
       state.sidebarOpen = false;
       updateSidebarToggle();
     }
