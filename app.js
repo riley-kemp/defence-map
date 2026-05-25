@@ -1815,7 +1815,7 @@
             .attr("class", "accordion-chevron")
             .style("font-size", "9px").style("color", c.accent)
             .style("margin-left", "8px").style("display", "none")
-            .style("transition", "transform 0.2s").text("▼");
+            .style("transition", "transform 0.2s").text("◀");
 
           // Sub-rows container
           row.append("div")
@@ -1831,7 +1831,7 @@
               if (!subEl || subEl.children.length === 0) return; // no sub-rows, nothing to toggle
               const isOpen = subEl.style.display !== "none";
               subEl.style.display = isOpen ? "none" : "block";
-              if (chevEl) chevEl.style.transform = isOpen ? "rotate(0deg)" : "rotate(180deg)";
+              if (chevEl) chevEl.style.transform = isOpen ? "rotate(0deg)" : "rotate(-90deg)";
               this.setAttribute("aria-expanded", isOpen ? "false" : "true");
             })
             .on("keydown", function(e) {
