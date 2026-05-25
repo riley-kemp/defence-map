@@ -354,8 +354,12 @@
   // Returns true on desktop when the viewport is too short to comfortably
   // display the donut chart and the Facility Operations Type accordion stacked.
   // 680 px is enough to fit both; below that we switch to a side-by-side layout.
+  // Also returns true for landscape mobile — the bottom sheet is always too short
+  // in landscape to stack these elements comfortably.
   const SIDEBAR_SHORT_THRESHOLD = 680;
-  const isSidebarShort = () => !_setupMobile && window.innerHeight < SIDEBAR_SHORT_THRESHOLD;
+  const isSidebarShort = () =>
+    isLandscapeMobile() ||
+    (!_setupMobile && window.innerHeight < SIDEBAR_SHORT_THRESHOLD);
 
   // ─── SECTION 8: DOM & LAYOUT SETUP ───────────────────────────────────────
   //  Builds the HTML structure of the whole application dynamically using D3.
@@ -1799,20 +1803,23 @@
         .attr("id", "detail-donut-col")
         .style("flex", isSidebarShort() ? "0 0 auto" : null);
 
-      donutCol.append("div").attr("id", "donut-chart").style("margin-bottom", "28px");
+      donutCol.append("div").attr("id", "donut-chart").style("margin-bottom", isSidebarShort() ? "16px" : "28px");
 
-      // Right column (note + accordion)
+      // ── Note ── always lives in the donut column, directly below the chart.
+      // In the stacked layout this naturally precedes the accordion.
+      // In the side-by-side layout it stays left, below the donut, so it never
+      // sits above the Facility Operations Type heading on the right.
+      donutCol.append("p")
+        .attr("id", "detail-note")
+        .style("font-size", "12px").style("color", c.muted)
+        .style("margin", isSidebarShort() ? "0" : "28px 0").style("line-height", "1.5").style("font-weight", "400")
+        .html("<b>Please note:</b> a single facility may serve multiple defence industries.");
+
+      // Right column (accordion only)
       const accordionCol = sideBySideRow.append("div")
         .attr("id", "detail-accordion-col")
         .style("flex", isSidebarShort() ? "1 1 0" : null)
         .style("min-width", isSidebarShort() ? "0" : null);
-
-      // ── Note ──
-      accordionCol.append("p")
-        .attr("id", "detail-note")
-        .style("font-size", "12px").style("color", c.muted)
-        .style("margin", isSidebarShort() ? "0 0 16px 0" : "28px 0").style("line-height", "1.5").style("font-weight", "400")
-        .html("<b>Please note:</b> a single facility may serve multiple defence industries.");
 
       // ── Accordion section heading ──
       accordionCol.append("div")
@@ -2043,22 +2050,54 @@
           }
         });
 
-    // Chart title below the donut
-    svgD.append("text").attr("transform", `translate(0, ${SIZE + 20})`).style("font-size", "11px").style("font-weight", "600").style("letter-spacing", "1px").style("fill", c.muted).style("font-family", "Inter").text("DEFENCE INDUSTRIES SERVED");
+    if (isSidebarShort()) {
+      // ── Short / landscape: legend sits to the right of the donut SVG ──
+      // The SVG covers only the donut circle — no title or legend rows inside it.
+      svgD.attr("height", SIZE);
 
-    // Colour key legend below the chart title, laid out in two columns
-    const legendG = svgD.append("g").attr("transform", `translate(0, ${SIZE + 36})`);
-    const COLS = 2; const COL_W = SIZE / COLS;
-    
-    industryData.forEach((d, i) => {
-      const x = (i % COLS) * COL_W; const y = Math.floor(i / COLS) * 20;
-      const row = legendG.append("g").attr("transform", `translate(${x},${y})`);
-      row.append("rect").attr("width", 8).attr("height", 8).attr("rx", 2).attr("fill", INDUSTRY_COLOURS[d.label]);
-      row.append("text").attr("x", 12).attr("y", 8).style("font-size", "11px").style("fill", c.muted).style("font-family", "Inter").text(d.label);
-    });
-    
-    // Extend the SVG height to fit the legend rows
-    svgD.attr("height", SIZE + 12 + Math.ceil(industryData.length / COLS) * 20);
+      // Wrap SVG in a flex container alongside the legend column
+      const donutNode = d3.select("#donut-chart");
+      const innerWrap = donutNode.insert("div", "svg")
+        .style("display", "flex")
+        .style("align-items", "center")
+        .style("gap", "16px");
+      // Move the SVG inside the wrapper
+      innerWrap.node().appendChild(svgD.node());
+
+      // Right column: title above the legend rows
+      const legendCol = innerWrap.append("div").style("display", "flex").style("flex-direction", "column").style("gap", "6px");
+
+      // "DEFENCE INDUSTRIES SERVED" title above the colour key
+      legendCol.append("div")
+        .style("font-size", "11px").style("font-weight", "600").style("letter-spacing", "1px")
+        .style("font-family", "Inter").style("color", c.muted).style("margin-bottom", "2px")
+        .text("DEFENCE INDUSTRIES SERVED");
+
+      // One row per industry
+      industryData.forEach(d => {
+        const row = legendCol.append("div").style("display", "flex").style("align-items", "center").style("gap", "6px");
+        row.append("div")
+          .style("width", "8px").style("height", "8px").style("border-radius", "2px").style("flex-shrink", "0")
+          .style("background", INDUSTRY_COLOURS[d.label]);
+        row.append("span")
+          .style("font-size", "11px").style("font-family", "Inter").style("color", c.muted)
+          .text(d.label);
+      });
+    } else {
+      // ── Normal height: title + legend rows below the donut in the SVG ──
+      svgD.append("text").attr("transform", `translate(0, ${SIZE + 20})`).style("font-size", "11px").style("font-weight", "600").style("letter-spacing", "1px").style("fill", c.muted).style("font-family", "Inter").text("DEFENCE INDUSTRIES SERVED");
+
+      const legendG = svgD.append("g").attr("transform", `translate(0, ${SIZE + 36})`);
+      const COLS = 2; const COL_W = SIZE / COLS;
+      industryData.forEach((d, i) => {
+        const x = (i % COLS) * COL_W; const y = Math.floor(i / COLS) * 20;
+        const row = legendG.append("g").attr("transform", `translate(${x},${y})`);
+        row.append("rect").attr("width", 8).attr("height", 8).attr("rx", 2).attr("fill", INDUSTRY_COLOURS[d.label]);
+        row.append("text").attr("x", 12).attr("y", 8).style("font-size", "11px").style("fill", c.muted).style("font-family", "Inter").text(d.label);
+      });
+      // Extend the SVG height to fit the legend rows
+      svgD.attr("height", SIZE + 12 + Math.ceil(industryData.length / COLS) * 20);
+    }
   }
 
   // ─── SECTION 15: CONTROLS DOM BUILD ──────────────────────────────────────
