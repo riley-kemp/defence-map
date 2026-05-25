@@ -288,18 +288,26 @@
   // On mobile, touchend fires first and we call preventDefault() to stop the
   // browser generating a synthetic click ~300ms later — preventing every button
   // from firing twice per tap. On desktop the normal click handler is used.
-  function onTap(selection, fn) {
-    return selection
-      .on("touchend", function(event) {
-        event.preventDefault();
-        fn.call(this, event);
-      })
-      .on("click", function(event) {
-        // Ignore clicks on touch devices — already handled by touchend above.
-        if (event.pointerType === "touch") return;
-        fn.call(this, event);
-      });
-  }
+	function onTap(selection, fn) {
+	  return selection
+		.on("touchstart", function(event) {
+		  const t = event.touches[0];
+		  this._tapStartX = t.clientX;
+		  this._tapStartY = t.clientY;
+		}, { passive: true })
+		.on("touchend", function(event) {
+		  const t = event.changedTouches[0];
+		  const dx = Math.abs(t.clientX - (this._tapStartX ?? t.clientX));
+		  const dy = Math.abs(t.clientY - (this._tapStartY ?? t.clientY));
+		  if (dx > 8 || dy > 8) return; // finger moved — it was a scroll, not a tap
+		  event.preventDefault();
+		  fn.call(this, event);
+		})
+		.on("click", function(event) {
+		  if (event.pointerType === "touch") return;
+		  fn.call(this, event);
+		});
+	}
 
   // Returns the full set of UI colours for the current dark/light mode.
   // Called via getC() rather than directly (see caching above).
