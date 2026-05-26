@@ -1165,7 +1165,7 @@
   svg.call(zoom);
 
   //  When provided a feature (i.e. a census division is pressed), calculate and provide the map position to zoom into.
-  function zoomToFeature(feature) {
+  function zoomToFeature(feature, sidebarWasClosed = false) {
     const svgNode = svg.node();
     const w = svgNode ? svgNode.clientWidth  : WIDTH;
     const h = svgNode ? svgNode.clientHeight : HEIGHT;
@@ -1203,8 +1203,30 @@
       return;
     }
 
+    // On short desktop viewports the legend sits at the bottom-right and can
+    // obscure the zoomed region. Measure its height and shift the vertical
+    // centre upward by half that amount so the region clears the overlay.
+    let legendOffsetY = 0;
+    if (isSidebarShort()) {
+      const legendNode = legendOverlay.node();
+      if (legendNode) {
+        const legendRect = legendNode.getBoundingClientRect();
+        legendOffsetY = legendRect.height / 2 + 16; // half legend height + small gap
+      }
+    }
+
+    // When the sidebar was closed and is now opening, the SVG clientWidth still
+    // reflects the pre-open (wider) size at the time zoomToFeature runs.
+    // Shift the horizontal centre leftward by half the sidebar width so the
+    // feature lands centred in the post-open map area once the animation settles.
+    let sidebarOffsetX = 0;
+    if (sidebarWasClosed) {
+      const effectiveWidth = isSidebarShort() ? SIDEBAR_WIDTH * 2 : SIDEBAR_WIDTH;
+      sidebarOffsetX = effectiveWidth / 2;
+    }
+
     const scale = Math.max(1, Math.min(150, 0.45 / Math.max(dx / w, dy / h)));
-    const translate = [w / 2 - scale * ((x0 + x1) / 2), h / 2 - scale * ((y0 + y1) / 2)];
+    const translate = [(w / 2 - sidebarOffsetX) - scale * ((x0 + x1) / 2), (h / 2 - legendOffsetY) - scale * ((y0 + y1) / 2)];
     svg.transition().duration(750).call(zoom.transform, d3.zoomIdentity.translate(translate[0], translate[1]).scale(scale));
   }
 
@@ -1562,8 +1584,12 @@
               // reorder that triggers a style recalc across all sibling paths.
               const el = this;
               const _hoverK = d3.zoomTransform(svg.node()).k;
-              if (el.nextSibling) d3.select(el).attr("stroke", c.text).attr("stroke-width", 1 / _hoverK).raise();
-              else d3.select(el).attr("stroke", c.text).attr("stroke-width", 1 / _hoverK);
+              // Don't overwrite the accent2 stroke on the selected region when hovering over it
+              const isSelected = d === state.selectedFeature;
+              if (!isSelected) {
+                if (el.nextSibling) d3.select(el).attr("stroke", c.text).attr("stroke-width", 1 / _hoverK).raise();
+                else d3.select(el).attr("stroke", c.text).attr("stroke-width", 1 / _hoverK);
+              }
               const hoverVal = getFilteredValue(d);
               updateLegendMarker(hoverVal > 0 ? hoverVal : null, false);
               tooltip.style("visibility", "visible").html(`
@@ -1657,8 +1683,11 @@
             // Pin the legend marker at this region's position
             updateLegendMarker(selVal > 0 ? selVal : null, true);
 
-            // Ensure the sidebar is open to show the detail panel
-            if (!state.sidebarOpen) {
+            // Ensure the sidebar is open to show the detail panel.
+            // Capture whether it was closed before we open it — zoomToFeature
+            // needs this to compensate for the sidebar width that is about to appear.
+            const _sidebarWasClosed = !state.sidebarOpen;
+            if (_sidebarWasClosed) {
               state.sidebarOpen = true;
               updateSidebarToggle();
             }
@@ -1684,7 +1713,7 @@
               .attr("stroke-width", 2 / _selectK)
               .raise();
 
-            zoomToFeature(d);
+            zoomToFeature(d, _sidebarWasClosed);
             updateSidebarDetail();
 
             if (isMobile()) {
@@ -2902,13 +2931,14 @@
       state.selectedFeature = d;
       const selVal = getFilteredValue(d);
       updateLegendMarker(selVal > 0 ? selVal : null, true);
-      if (!state.sidebarOpen) { state.sidebarOpen = true; updateSidebarToggle(); }
+      const _kbSidebarWasClosed = !state.sidebarOpen;
+      if (_kbSidebarWasClosed) { state.sidebarOpen = true; updateSidebarToggle(); }
       // Dim all regions and highlight the focused one using the cached selection
       cdPaths.style("opacity", 0.35).attr("stroke", getC().bg);
       cdPaths
         .filter(p => p === d)
         .style("opacity", 1).attr("stroke", getC().accent2).attr("stroke-width", 2 / d3.zoomTransform(svg.node()).k).raise();
-      zoomToFeature(d);
+      zoomToFeature(d, _kbSidebarWasClosed);
       updateSidebarDetail();
       tooltip.style("visibility", "hidden");
     }
