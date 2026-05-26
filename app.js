@@ -1126,6 +1126,7 @@
 
 	let tickPending = false; // Flag to check if an animation frame is already requested
 	let _mousemoveRafPending = false; // Flag to throttle tooltip repositioning on mousemove
+	let _lastStrokeK = 1; // Last scale at which stroke widths were corrected
 
 	const zoom = d3.zoom()
 		.scaleExtent([1, 40])
@@ -1147,6 +1148,13 @@
 		  const { x, y, k } = event.transform;
 		  mapGroup.style("transform", `translate(${x}px,${y}px) scale(${k})`);
 		  mapGroup.style("transform-origin", "0 0");
+		  // Correct stroke widths when scale changes (not on every pan frame).
+		  // Without vector-effect:non-scaling-stroke, strokes scale with the CSS transform.
+		  // Checking k !== _lastStrokeK avoids the per-path DOM write on pure pans.
+		  if (k !== _lastStrokeK) {
+		    _lastStrokeK = k;
+		    cdPaths.attr("stroke-width", d => (d === state.selectedFeature ? 2 : 0.5) / k);
+		  }
 		})
 		.on("end", () => {
 		  state.isZooming = false;
@@ -1537,8 +1545,7 @@
         // ── Enter: create paths and attach all event handlers exactly once ──
         enter => {
           const p = enter.append("path")
-            .attr("class", "cd-region")
-            .attr("vector-effect", "non-scaling-stroke"); // Keep border width constant regardless of zoom level
+            .attr("class", "cd-region");
 
           // ── Hover interactions (desktop only — mobile uses tap) ──
           if (!_mobile) {
@@ -1548,14 +1555,15 @@
               state.hoveredFeature = d;
               if (state._hoveredEl && state._hoveredEl !== this) {
                 const prev = d3.select(state._hoveredEl);
-                if (prev.attr("stroke") !== c.accent2) prev.attr("stroke", c.bg).attr("stroke-width", 0.5);
+                if (prev.attr("stroke") !== c.accent2) prev.attr("stroke", c.bg).attr("stroke-width", 0.5 / d3.zoomTransform(svg.node()).k);
               }
               state._hoveredEl = this;
               // Only raise if not already the last child — raise() causes a DOM
               // reorder that triggers a style recalc across all sibling paths.
               const el = this;
-              if (el.nextSibling) d3.select(el).attr("stroke", c.text).attr("stroke-width", 1).raise();
-              else d3.select(el).attr("stroke", c.text).attr("stroke-width", 1);
+              const _hoverK = d3.zoomTransform(svg.node()).k;
+              if (el.nextSibling) d3.select(el).attr("stroke", c.text).attr("stroke-width", 1 / _hoverK).raise();
+              else d3.select(el).attr("stroke", c.text).attr("stroke-width", 1 / _hoverK);
               const hoverVal = getFilteredValue(d);
               updateLegendMarker(hoverVal > 0 ? hoverVal : null, false);
               tooltip.style("visibility", "visible").html(`
@@ -1588,7 +1596,7 @@
               state.hoveredFeature = null;
               state._hoveredEl = null;
               const sel = d3.select(this);
-              if (sel.attr("stroke") !== c.accent2) sel.attr("stroke", c.bg).attr("stroke-width", 0.5);
+              if (sel.attr("stroke") !== c.accent2) sel.attr("stroke", c.bg).attr("stroke-width", 0.5 / d3.zoomTransform(svg.node()).k);
               clearLegendMarker();
               tooltip.style("visibility", "hidden");
             })
@@ -1598,8 +1606,9 @@
               // Only raise if not already the last child — raise() causes a DOM
               // reorder that triggers a style recalc across all sibling paths.
               const el = this;
-              if (el.nextSibling) d3.select(el).attr("stroke", c.text).attr("stroke-width", 1).raise();
-              else d3.select(el).attr("stroke", c.text).attr("stroke-width", 1);
+              const _hoverK = d3.zoomTransform(svg.node()).k;
+              if (el.nextSibling) d3.select(el).attr("stroke", c.text).attr("stroke-width", 1 / _hoverK).raise();
+              else d3.select(el).attr("stroke", c.text).attr("stroke-width", 1 / _hoverK);
               const hoverVal = getFilteredValue(d);
               updateLegendMarker(hoverVal > 0 ? hoverVal : null, false);
               const rect = this.getBoundingClientRect();
@@ -1622,7 +1631,7 @@
             .on("blur", function() {
               const c = getC();
               const sel = d3.select(this);
-              if (sel.attr("stroke") !== c.accent2) sel.attr("stroke", c.bg).attr("stroke-width", 0.5);
+              if (sel.attr("stroke") !== c.accent2) sel.attr("stroke", c.bg).attr("stroke-width", 0.5 / d3.zoomTransform(svg.node()).k);
               clearLegendMarker();
               tooltip.style("visibility", "hidden");
             });
@@ -1661,17 +1670,18 @@
             // Dim all regions except the clicked one via a short transition so
             // D3 batches DOM writes through rAF rather than blocking the main thread.
             const clicked = this;
+            const _selectK = d3.zoomTransform(svg.node()).k;
             cdPaths
               .filter(function() { return this !== clicked; })
               .transition("select").duration(80)
               .style("opacity", 0.35)
               .attr("stroke", c.bg)
-              .attr("stroke-width", 0.5);
+              .attr("stroke-width", 0.5 / _selectK);
             d3.select(this)
               .interrupt()
               .style("opacity", 1)
               .attr("stroke", c.accent2)
-              .attr("stroke-width", 2)
+              .attr("stroke-width", 2 / _selectK)
               .raise();
 
             zoomToFeature(d);
@@ -1709,10 +1719,11 @@
     // Hover and click handlers call .raise() which reorders <path> elements in the
     // DOM. D3's index-based data join would then rebind features to the wrong paths
     // if geometry were skipped, causing regions to display another region's data.
+    const _currentK = d3.zoomTransform(svg.node()).k;
     cdPaths
       .attr("d", path)
       .attr("stroke", d => d === state.selectedFeature ? c.accent2 : c.bg)
-      .attr("stroke-width", d => d === state.selectedFeature ? 2 : 0.5)
+      .attr("stroke-width", d => (d === state.selectedFeature ? 2 : 0.5) / _currentK)
       .style("opacity", d => (state.selectedFeature && d !== state.selectedFeature) ? 0.35 : 1)
       .attr("tabindex", d => {
         const v = _valSnapshot.get(d._cduid) ?? 0;
@@ -2797,11 +2808,12 @@
     // Cancel any in-flight "select" dim transition, then animate back to full
     // opacity. A single interrupt() cancels all transitions including named ones.
     cdPaths.interrupt();
+    const _restoreK = d3.zoomTransform(svg.node()).k;
     cdPaths
       .transition("restore").duration(600)
       .style("opacity", 1)
       .attr("stroke", c.bg)
-      .attr("stroke-width", 0.5);
+      .attr("stroke-width", 0.5 / _restoreK);
     // On mobile, close the bottom sheet when a region is deselected
     if (isMobile()) {
       _isFullscreen = false;
@@ -2895,7 +2907,7 @@
       cdPaths.style("opacity", 0.35).attr("stroke", getC().bg);
       cdPaths
         .filter(p => p === d)
-        .style("opacity", 1).attr("stroke", getC().accent2).attr("stroke-width", 2).raise();
+        .style("opacity", 1).attr("stroke", getC().accent2).attr("stroke-width", 2 / d3.zoomTransform(svg.node()).k).raise();
       zoomToFeature(d);
       updateSidebarDetail();
       tooltip.style("visibility", "hidden");
