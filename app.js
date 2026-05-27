@@ -24,7 +24,7 @@
     const url = "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/data/defence_facilities.csv";
     const response = await fetch(url);
     if (!response.ok) throw new Error(`Failed to fetch CSV: ${response.statusText}`);
-    
+
     // d3.csvParse converts the raw CSV text into an array of plain JS objects —
     // one object per row, with column headers as keys.
     const rawText = await response.text();
@@ -171,7 +171,7 @@
     infoOpen: false,                   // Whether the "About this map" info panel is visible
     sidebarOpen: Math.min(window.innerWidth, window.innerHeight) > 768, // Closed on mobile, open on desktop
     isPanning: false,                  // Whether the user is actively panning/dragging the map
-	isZooming: false, 				   // Whether the user is actively zooming in the map
+  isZooming: false,            // Whether the user is actively zooming in the map
     legendMin: 0,                      // Lowest facility count currently shown in the legend
     legendMax: 1,                      // Highest facility count currently shown in the legend
     legendColourScale: null,           // The D3 colour-scale function currently in use
@@ -294,32 +294,38 @@
   // On mobile, touchend fires first and we call preventDefault() to stop the
   // browser generating a synthetic click ~300ms later — preventing every button
   // from firing twice per tap. On desktop the normal click handler is used.
-	function onTap(selection, fn) {
-	  return selection
-		.on("touchstart", function(event) {
-		  const t = event.touches[0];
-		  this._tapStartX = t.clientX;
-		  this._tapStartY = t.clientY;
-		}, { passive: true })
-		.on("touchend", function(event) {
-		  const t = event.changedTouches[0];
-		  const dx = Math.abs(t.clientX - (this._tapStartX ?? t.clientX));
-		  const dy = Math.abs(t.clientY - (this._tapStartY ?? t.clientY));
-		  if (dx > 8 || dy > 8) return; // finger moved — it was a scroll, not a tap
-		  event.preventDefault();
-		  fn.call(this, event);
-		})
-		.on("click", function(event) {
-		  if (event.pointerType === "touch") return;
-		  fn.call(this, event);
-		});
-	}
+  function onTap(selection, fn) {
+    return selection
+      .on("touchstart", function(event) {
+        const t = event.touches[0];
+        this._tapStartX = t.clientX;
+        this._tapStartY = t.clientY;
+      }, { passive: true })
+      .on("touchend", function(event) {
+        const t = event.changedTouches[0];
+        const dx = Math.abs(t.clientX - (this._tapStartX ?? t.clientX));
+        const dy = Math.abs(t.clientY - (this._tapStartY ?? t.clientY));
+        if (dx > 8 || dy > 8) return; // finger moved — it was a scroll, not a tap
+        event.preventDefault();
+        // Record the time so the click guard below can suppress the browser's
+        // synthetic click (~300ms later). Relying on event.pointerType === "touch"
+        // is not reliable — some browsers emit the synthetic click with pointerType
+        // "" (empty string) rather than "touch", causing fn to fire twice.
+        this._lastTouchEnd = Date.now();
+        fn.call(this, event);
+      })
+      .on("click", function(event) {
+        // Suppress synthetic clicks generated after a touch (within 500ms).
+        if (this._lastTouchEnd && Date.now() - this._lastTouchEnd < 500) return;
+        fn.call(this, event);
+      });
+  }
 
   // Returns the full set of UI colours for the current dark/light mode.
   // Called via getC() rather than directly (see caching above).
   function getColours(isDark) {
     return isDark
-      ? {// dark mode
+      ? { // dark mode
           bg:          "#0e1117",             // Page background
           surface:     "#161b24",             // Card / sidebar background
           border:      "rgba(255,255,255,0.1)", // Subtle dividing lines
@@ -330,7 +336,7 @@
           noData:      "#2a3040",             // Region with facilities, but none match the filter
           noDataNone:  "#191d25"              // Region with zero defence facilities recorded
         }
-      : {// light mode
+      : { // light mode
           bg:          "#f8f9fa",
           surface:     "#ffffff",
           border:      "rgba(0,0,0,0.08)",
@@ -414,7 +420,7 @@
     }
     #mobile-filter-toggle {
       position: absolute;
-      bottom: max(16px, env(safe-area-inset-bottom, 16px));
+      bottom: max(35px, env(safe-area-inset-bottom, 35px));
       left: 50%;
       transform: translateX(-50%);
       z-index: 200;
@@ -428,6 +434,21 @@
       box-shadow: 0 4px 16px rgba(0,0,0,0.25);
       transition: all 0.3s ease;
       white-space: nowrap;
+    }
+
+    /* ── Map region opacity transitions ── */
+    /* Opacity is driven entirely by renderMap()'s inline style — CSS transition
+       handles the animation so D3 transitions don't compete with renderMap writes. */
+    path.cd-region {
+      transition: opacity 0.25s ease;
+      -webkit-tap-highlight-color: transparent;
+    }
+
+    /* ── Suppress Chrome/Safari blue flash on click ── */
+    path.cd-region,
+    #control-panel button,
+    #map-container button {
+      -webkit-tap-highlight-color: transparent;
     }
 
     /* ── Accessibility: visible focus indicators ── */
@@ -589,14 +610,14 @@
 
   // Attach D3 to the existing #map-container div from index.html.
   // This becomes the outermost wrapper for the whole application.
-	const container = d3.select("#map-container")
-	  .style("display", "flex")
-	  .style("font-family", "'Inter', sans-serif")
-	  .style("width", "100%")
-	  .style("height", "100%")
-	  .style("overflow", "hidden")
-	  .style("position", "relative")
-	  .style("transition", "background 0.3s ease");
+  const container = d3.select("#map-container")
+    .style("display", "flex")
+    .style("font-family", "'Inter', sans-serif")
+    .style("width", "100%")
+    .style("height", "100%")
+    .style("overflow", "hidden")
+    .style("position", "relative")
+    .style("transition", "background 0.3s ease");
 
   // The control panel is a floating column of icon buttons pinned to the
   // top-right corner of the map (info, theme toggle, zoom in/out, home).
@@ -622,13 +643,24 @@
   // button — otherwise the setTimeout would restore stale pre-theme-flip colours.
   function flashBtn(btn) {
     const c = getC();
-    btn.style("background", c.accent).style("color", "#fff").style("border", `1px solid ${c.accent}`);
-    // Always clear the inline styles after the flash so the CSS rule (var(--surface) etc.)
-    // takes back control. Previously, skipRestore=true was passed by the theme toggle
-    // expecting updateUI() to repaint the button — but updateUI() no longer writes
-    // inline styles to #control-panel buttons, so the green would stick permanently.
-    setTimeout(() => {
-      btn.style("background", null).style("color", null).style("border", null);
+    const node = btn.node();
+    // Cancel any pending restore timer for this button so a rapid second click
+    // doesn't let an earlier timer clear the new flash mid-animation.
+    if (node._flashTimer) clearTimeout(node._flashTimer);
+    // Disable the CSS transition before applying green so the flash is instant
+    // rather than fading in — and so the subsequent null-clear doesn't get
+    // interrupted mid-transition and leave the button permanently green.
+    btn.style("transition", "none")
+       .style("background", c.accent)
+       .style("color", "#fff")
+       .style("border", `1px solid ${c.accent}`);
+    node._flashTimer = setTimeout(() => {
+      node._flashTimer = null;
+      // Re-enable transition before clearing so the fade-back animates smoothly.
+      btn.style("transition", null)
+         .style("background", null)
+         .style("color", null)
+         .style("border", null);
     }, 220);
   }
 
@@ -692,6 +724,7 @@
     .style("font-weight", "600")
     .on("click", function() {
       flashBtn(d3.select(this));
+      _isProgrammaticZoom = true;
       svg.transition().duration(350).call(zoom.scaleBy, 1.5);
     });
   const zoomOutBtn = makeBtn("−", "Zoom out")
@@ -699,6 +732,7 @@
     .style("font-weight", "600")
     .on("click", function() {
       flashBtn(d3.select(this));
+      _isProgrammaticZoom = true;
       svg.transition().duration(350).call(zoom.scaleBy, 0.67);
     });
 
@@ -845,14 +879,14 @@
             const safeH        = h - safeTop;
             // In landscape safeH starts below a tall legend, so the midpoint
             // sits too low — weight toward the upper third instead.
-            const centreFrac   = isLandscapeMobile() ? 0.35 : 0.5;
+            const centreFrac   = isLandscapeMobile() ? 0.30 : 0.35;
             const safeCentreY  = safeTop + safeH * centreFrac;
             const currentScale = d3.zoomTransform(svg.node()).k;
             const targetScale  = Math.min(12, 0.70 / Math.max(dx / w, dy / safeH));
             const scale        = Math.max(currentScale, targetScale);
             const tx = w / 2 - scale * ((x0 + x1) / 2);
             const ty = safeCentreY - scale * ((y0 + y1) / 2);
-            svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+            _isProgrammaticZoom = true; svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
             restoreMapAppearance();
           }, 80);
         } else {
@@ -863,87 +897,87 @@
       });
 
 
-	// Attach drag to the whole handleWrap for a generous ~26px touch target
-	handleWrap.on("touchstart", function(event) {
-	  dragStartY = event.touches[0].clientY;
-	  dragStartH = sidebar.node().getBoundingClientRect().height;
-	  sidebar.style("transition", "background 0.3s ease, border 0.3s ease");
-	  event.preventDefault();
-	}, { passive: false });
+  // Attach drag to the whole handleWrap for a generous ~26px touch target
+  handleWrap.on("touchstart", function(event) {
+    dragStartY = event.touches[0].clientY;
+    dragStartH = sidebar.node().getBoundingClientRect().height;
+    sidebar.style("transition", "background 0.3s ease, border 0.3s ease");
+    event.preventDefault();
+  }, { passive: false });
 
-	handleWrap.on("touchmove", function(event) {
-	  if (dragStartY === null) return;
-	  if (_dragRafPending) return; // Already have a frame queued — skip this event
-	  _dragRafPending = true;
+  handleWrap.on("touchmove", function(event) {
+    if (dragStartY === null) return;
+    if (_dragRafPending) return; // Already have a frame queued — skip this event
+    _dragRafPending = true;
 
-	  const dy   = event.touches[0].clientY - dragStartY;
-	  const newH = Math.min(Math.max(dragStartH - dy, 40), getMaxSheetH());
+    const dy   = event.touches[0].clientY - dragStartY;
+    const newH = Math.min(Math.max(dragStartH - dy, 40), getMaxSheetH());
 
-	  requestAnimationFrame(() => {
-		sidebar.style("height", newH + "px");
-		_dragRafPending = false;
-	  });
+    requestAnimationFrame(() => {
+    sidebar.style("height", newH + "px");
+    _dragRafPending = false;
+    });
 
-	  event.preventDefault();
-	}, { passive: false });
+    event.preventDefault();
+  }, { passive: false });
 
-	handleWrap.on("touchend", function(event) {
-	  if (dragStartY === null) return;
-	  const curH = sidebar.node().getBoundingClientRect().height;
-	  const scrH = window.innerHeight;
-	  sidebar.style("transition", "transform 0.35s ease, height 0.35s ease, background 0.3s ease, border 0.3s ease");
-	  if (curH < scrH * CLOSE_RATIO) {
-		// Below close threshold: forget user height, reset to default, close
-		_userSetHeight = null;
-		_isFullscreen  = false;
-		sidebar.style("height", (scrH * DEFAULT_H_RATIO()) + "px");
-		state.sidebarOpen = false;
-		// Sliding the sheet down: recentre on the selected region then clear it
-		if (state.selectedFeature) {
-		  const feat = state.selectedFeature;
-		  setTimeout(() => {
-		    const svgNode = svg.node();
-		    const w = svgNode ? svgNode.clientWidth : WIDTH;
-		    const h = svgNode ? svgNode.clientHeight : HEIGHT;
-		    const [[x0, y0], [x1, y1]] = path.bounds(feat);
-		    const dx = x1 - x0; const dy = y1 - y0;
-		    // Legend is top-left; keep region centre below it when recentring after close
-		    const legendNode2  = legendOverlay.node();
-		    const legendRect2  = legendNode2 ? legendNode2.getBoundingClientRect() : null;
-		    const svgTop2      = svgNode ? svgNode.getBoundingClientRect().top : 0;
-		    const legendBottom = legendRect2 ? legendRect2.bottom - svgTop2 + 8 : 164;
-		    const safeTop      = Math.min(legendBottom, h * 0.5);
-		    const safeH        = h - safeTop;
-		    // In landscape safeH starts below a tall legend, so the midpoint
-		    // sits too low — weight toward the upper third instead.
-		    const centreFrac  = isLandscapeMobile() ? 0.35 : 0.5;
-		    const safeCentreY = safeTop + safeH * centreFrac;
-		    const currentScale = d3.zoomTransform(svg.node()).k;
-		    const targetScale  = Math.min(12, 0.70 / Math.max(dx / w, dy / safeH));
-		    const scale        = Math.max(currentScale, targetScale);
-		    const tx = w / 2 - scale * ((x0 + x1) / 2);
-		    const ty = safeCentreY - scale * ((y0 + y1) / 2);
-		    svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
-		    restoreMapAppearance();
-		  }, 80);
-		}
-	  } else if (curH >= scrH * FULLSCREEN_RATIO) {
-		// Above fullscreen threshold: snap to top
-		_isFullscreen  = true;
-		_userSetHeight = null;
-		sidebar.style("height", getMaxSheetH() + "px");
-		state.sidebarOpen = true;
-	  } else {
-		// User settled at custom height — remember it
-		_isFullscreen  = false;
-		_userSetHeight = curH;
-		state.sidebarOpen = true;
-	  }
-	  dragStartY = null;
-	  dragStartH = null;
-	  _dragRafPending = false; // Clear any pending flag on gesture end
-	  updateSidebarToggle();
-	});
+  handleWrap.on("touchend", function(event) {
+    if (dragStartY === null) return;
+    const curH = sidebar.node().getBoundingClientRect().height;
+    const scrH = window.innerHeight;
+    sidebar.style("transition", "transform 0.35s ease, height 0.35s ease, background 0.3s ease, border 0.3s ease");
+    if (curH < scrH * CLOSE_RATIO) {
+    // Below close threshold: forget user height, reset to default, close
+    _userSetHeight = null;
+    _isFullscreen  = false;
+    sidebar.style("height", (scrH * DEFAULT_H_RATIO()) + "px");
+    state.sidebarOpen = false;
+    // Sliding the sheet down: recentre on the selected region then clear it
+    if (state.selectedFeature) {
+      const feat = state.selectedFeature;
+      setTimeout(() => {
+        const svgNode = svg.node();
+        const w = svgNode ? svgNode.clientWidth : WIDTH;
+        const h = svgNode ? svgNode.clientHeight : HEIGHT;
+        const [[x0, y0], [x1, y1]] = path.bounds(feat);
+        const dx = x1 - x0; const dy = y1 - y0;
+        // Legend is top-left; keep region centre below it when recentring after close
+        const legendNode2  = legendOverlay.node();
+        const legendRect2  = legendNode2 ? legendNode2.getBoundingClientRect() : null;
+        const svgTop2      = svgNode ? svgNode.getBoundingClientRect().top : 0;
+        const legendBottom = legendRect2 ? legendRect2.bottom - svgTop2 + 8 : 164;
+        const safeTop      = Math.min(legendBottom, h * 0.5);
+        const safeH        = h - safeTop;
+        // In landscape safeH starts below a tall legend, so the midpoint
+        // sits too low — weight toward the upper third instead.
+        const centreFrac  = isLandscapeMobile() ? 0.30 : 0.35;
+        const safeCentreY = safeTop + safeH * centreFrac;
+        const currentScale = d3.zoomTransform(svg.node()).k;
+        const targetScale  = Math.min(12, 0.70 / Math.max(dx / w, dy / safeH));
+        const scale        = Math.max(currentScale, targetScale);
+        const tx = w / 2 - scale * ((x0 + x1) / 2);
+        const ty = safeCentreY - scale * ((y0 + y1) / 2);
+        _isProgrammaticZoom = true; svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+        restoreMapAppearance();
+      }, 80);
+    }
+    } else if (curH >= scrH * FULLSCREEN_RATIO) {
+    // Above fullscreen threshold: snap to top
+    _isFullscreen  = true;
+    _userSetHeight = null;
+    sidebar.style("height", getMaxSheetH() + "px");
+    state.sidebarOpen = true;
+    } else {
+    // User settled at custom height — remember it
+    _isFullscreen  = false;
+    _userSetHeight = curH;
+    state.sidebarOpen = true;
+    }
+    dragStartY = null;
+    dragStartH = null;
+    _dragRafPending = false; // Clear any pending flag on gesture end
+    updateSidebarToggle();
+  });
 
     // Floating "▲ FILTERS" pill button at the bottom of the map.
     // Only visible when the bottom sheet is closed, giving users a clear way
@@ -1013,7 +1047,7 @@
     .style("transform", "translateX(100%)")           // starts off-screen to the right
     .style("transition", "transform 0.4s ease")       // background/border handled by CSS tokens
     .style("box-sizing", "border-box");
-  
+
   // Alias for clarity — infoSidebar and infoModal are the same element
   const infoModal = infoSidebar;
 
@@ -1060,13 +1094,12 @@
     .style("flex", "1")
     .style("position", "relative")
     .style("transition", "width 0.4s ease, flex 0.4s ease");
-  
+
   // The SVG element where D3 draws all the geographic regions.
   // viewBox makes it resolution-independent; it scales to fill its container.
   const svg = mapContainer.append("svg")
   .style("width", "100%")
   .style("height", "100%")
-  .style("shape-rendering", "geometricPrecision")
   .style("touch-action", "none")  // Required for D3 zoom to receive touch events in Firefox
   .on("click", () => {});
 
@@ -1117,49 +1150,96 @@
   // ─── SECTION 10: MAP PROJECTION & ZOOM ───────────────────────────────────
   //  A "projection" converts latitude/longitude coordinates from the GeoJSON
   //  into x/y pixel positions on the SVG canvas.
-	const projection = d3.geoIdentity()
-	  .reflectY(true) // GIS systems have Y going up, SVGs have Y going down
-	  .fitExtent([[10, 20], [WIDTH - 10, HEIGHT - 110]], fixedData);
-	const path = d3.geoPath().projection(projection);
+  const projection = d3.geoIdentity()
+    .reflectY(true) // GIS systems have Y going up, SVGs have Y going down
+    .fitExtent([[10, 20], [WIDTH - 10, HEIGHT - 110]], fixedData);
+  const path = d3.geoPath().projection(projection);
 
   // ─── SECTION 11: ZOOM AND PANNING CONFIGURATION ───────────────────────────
 
-	let tickPending = false; // Flag to check if an animation frame is already requested
-	let _mousemoveRafPending = false; // Flag to throttle tooltip repositioning on mousemove
-	let _lastStrokeK = 1; // Last scale at which stroke widths were corrected
+  let tickPending = false; // Flag to check if an animation frame is already requested
+  let _mousemoveRafPending = false; // Flag to throttle tooltip repositioning on mousemove
+  let _lastStrokeK = 1; // Last scale at which stroke widths were corrected
 
-	const zoom = d3.zoom()
-		.scaleExtent([1, 40])
-		.on("start", (event) => {
-		  if (event.sourceEvent) {
-			const src = event.sourceEvent.type;
-			if (src === "mousedown" || src === "touchstart") {
-			  state.isPanning = true;
-			} else {
-			  state.isZooming = true;
-			}
-		  }
-		  tooltip.style("visibility", "hidden");
-		})
-		.on("zoom", (event) => {
-		  // Apply as a CSS transform rather than an SVG attribute transform.
-		  // Chrome composites CSS transforms on the GPU; SVG attribute transforms
-		  // are processed on the main thread through the SVG renderer every frame.
-		  const { x, y, k } = event.transform;
-		  mapGroup.style("transform", `translate(${x}px,${y}px) scale(${k})`);
-		  mapGroup.style("transform-origin", "0 0");
-		  // Correct stroke widths when scale changes (not on every pan frame).
-		  // Without vector-effect:non-scaling-stroke, strokes scale with the CSS transform.
-		  // Checking k !== _lastStrokeK avoids the per-path DOM write on pure pans.
-		  if (k !== _lastStrokeK) {
-		    _lastStrokeK = k;
-		    cdPaths.attr("stroke-width", d => (d === state.selectedFeature ? 2 : 0.5) / k);
-		  }
-		})
-		.on("end", () => {
-		  state.isZooming = false;
-		  state.isPanning = false;
-		});
+  // True while a programmatic (D3 transition) zoom is in flight.
+  let _isProgrammaticZoom = false;
+
+  // Quantise a scale value to the nearest power-of-√2 bucket (≈ 1.41×).
+  // Two scale values that fall in the same bucket don't need a stroke update.
+  // This gives ~14 distinct levels across the 0.6–40 range, so strokes are
+  // corrected a handful of times during a long zoom rather than every frame.
+  const _strokeBucket = k => Math.round(Math.log(k) / Math.log(Math.SQRT2));
+  let _lastStrokeBucket = _strokeBucket(1);
+
+  function _applyStrokeWidths(k) {
+    _lastStrokeK = k;
+    _lastStrokeBucket = _strokeBucket(k);
+    cdPaths.attr("stroke-width", d => (d === state.selectedFeature ? 2 : 0.5) / k);
+  }
+
+  const zoom = d3.zoom()
+    .scaleExtent([0.6, 40])
+    .on("start", (event) => {
+      if (event.sourceEvent) {
+      const src = event.sourceEvent.type;
+      if (src === "mousedown" || src === "touchstart") {
+        state.isPanning = true;
+      } else {
+        state.isZooming = true;
+      }
+      }
+      tooltip.style("visibility", "hidden");
+
+      if (_isProgrammaticZoom) {
+        // Reset the <g> attribute transform to identity so the SVG element's
+        // CSS transform carries the full translation/scale.  This avoids the
+        // double-transform composition problem (CSS scale amplifying the existing
+        // attribute offset) that caused the wrong-spot-then-jump bug.
+        mapGroup.attr("transform", "translate(0,0) scale(1)");
+        svg.style("will-change", "transform");
+      }
+    })
+    .on("zoom", (event) => {
+      const { x, y, k } = event.transform;
+
+      if (_isProgrammaticZoom) {
+        // Drive the full transform as a CSS transform on the SVG element.
+        // Chrome promotes the SVG element to a compositor layer (unlike <g>),
+        // so the animation runs on the GPU without repainting SVG paths.
+        // Firefox does not blur SVG elements under CSS transform (only <g>),
+        // so this is sharp in both browsers.
+        svg.style("transform-origin", "0 0")
+           .style("transform", `translate(${x}px,${y}px) scale(${k})`);
+        // Update stroke widths only when the scale crosses a bucket boundary
+        // (~every 1.41× change).  This keeps borders visually thin throughout
+        // the zoom without the cost of a per-frame mass DOM attribute write.
+        if (_strokeBucket(k) !== _lastStrokeBucket) {
+          _applyStrokeWidths(k);
+        }
+      } else {
+        mapGroup.attr("transform", `translate(${x},${y}) scale(${k})`);
+
+        // Throttle stroke updates to bucket boundaries during manual zoom
+        if (_strokeBucket(k) !== _lastStrokeBucket) {
+        _applyStrokeWidths(k);
+        }
+      }
+    })
+    .on("end", (event) => {
+      state.isZooming = false;
+      state.isPanning = false;
+      if (_isProgrammaticZoom) {
+        _isProgrammaticZoom = false;
+        const { x, y, k } = event.transform;
+        // Commit the final position to the <g> attribute transform and clear
+        // the CSS override so Firefox renders at full vector sharpness at rest.
+        svg.style("transform", null)
+           .style("transform-origin", null)
+           .style("will-change", null);
+        mapGroup.attr("transform", `translate(${x},${y}) scale(${k})`);
+        _applyStrokeWidths(k);
+      }
+    });
 
   // Attach the zoom behavior to the SVG canvas
   svg.call(zoom);
@@ -1199,6 +1279,7 @@
       const cy = (y0 + y1) / 2;
       const tx = w / 2 - scale * cx;
       const ty = safeCentreY - scale * cy;
+      _isProgrammaticZoom = true;
       svg.transition().duration(600).call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
       return;
     }
@@ -1227,6 +1308,7 @@
 
     const scale = Math.max(1, Math.min(150, 0.45 / Math.max(dx / w, dy / h)));
     const translate = [(w / 2 - sidebarOffsetX) - scale * ((x0 + x1) / 2), (h / 2 - legendOffsetY) - scale * ((y0 + y1) / 2)];
+    _isProgrammaticZoom = true;
     svg.transition().duration(750).call(zoom.transform, d3.zoomIdentity.translate(translate[0], translate[1]).scale(scale));
   }
 
@@ -1241,14 +1323,50 @@
     // Refit projection into actual pixel space with a small inset on each side
     projection.fitExtent([[10, 20], [w - 10, h - 20]], fixedData);
     // Redraw all paths using the updated projection
-    // Always redraw — cdPaths.enter() is empty after the first render,
-    // so the old guard prevented paths from ever updating after a projection refit.
     cdPaths.attr("d", path);
-    // Clear any D3 zoom/pan transform — projection now handles the positioning
+
+    // ── Desktop legend-overlap compensation ─────────────────────────────────
+    // On desktop, the legend sits bottom-right. If its bounding box would cover
+    // a meaningful portion of the map height, pull back the zoom slightly so
+    // Canada is fully visible without the legend obscuring it.
+    let desktopScale = 1;
+    if (!isMobile()) {
+    const legendNode = legendOverlay.node();
+    if (legendNode) {
+      // Use clientHeight for the SVG height — getBoundingClientRect() is
+      // skewed by any CSS transform still on the element from a prior zoom,
+      // whereas clientHeight always reflects the layout size.
+      const svgH      = svgNode ? svgNode.clientHeight : h;
+      const legendH   = legendNode.offsetHeight;
+      // Fraction of the SVG height the legend occupies
+      const legendFraction = legendH / svgH;
+      // Pull back as soon as the legend covers more than ~8% of the map height
+      if (legendFraction > 0.08) {
+      // Scale down proportionally to how much vertical space the legend takes
+      desktopScale = 1 - legendFraction * 1.4;
+      desktopScale = Math.max(0.60, desktopScale); // never pull back more than ~40%
+      }
+    }
+    }
+
+    // Clear any D3 zoom/pan transform — projection now handles the positioning.
+    // Apply the legend-compensation scale centred in the SVG.
+    const transform = desktopScale === 1
+    ? d3.zoomIdentity
+    : d3.zoomIdentity
+      .translate(w / 2 * (1 - desktopScale), h / 2 * (1 - desktopScale))
+      .scale(desktopScale);
+
     if (animate === false) {
-      svg.call(zoom.transform, d3.zoomIdentity);
+    svg.call(zoom.transform, transform);
     } else {
-      svg.transition().duration(750).call(zoom.transform, d3.zoomIdentity);
+    // zoomToFull refits the projection and redraws all paths, so the <g> is
+    // always starting from a known clean state.  Skip the CSS-transform path
+    // (_isProgrammaticZoom) and drive the zoom directly via the SVG attribute
+    // transform — this is what the legend-compensation translate/scale was
+    // designed to work with, and avoids the double-offset that occurs when the
+    // CSS transform on the SVG element compounds with the centring translate.
+    svg.transition().duration(750).call(zoom.transform, transform);
     }
   }
 
@@ -1284,6 +1402,13 @@
     // When the viewport is short, double the sidebar width so the donut chart
     // and Facility Operations Type accordion can sit side-by-side.
     const effectiveWidth = isSidebarShort() ? SIDEBAR_WIDTH * 2 : SIDEBAR_WIDTH;
+
+    // Snapshot the zoom transform and SVG width BEFORE the sidebar CSS transition
+    // starts so we have a stable reference point to compute corrections against.
+    const svgNodePre = svg.node();
+    const wBefore    = svgNodePre ? svgNodePre.clientWidth : WIDTH;
+    const tBefore    = d3.zoomTransform(svgNodePre);
+
     if (state.sidebarOpen) {
       sidebar.style("width", `${effectiveWidth}px`).style("padding", "30px 24px");
       sidebarInnerContent.style("display", "block");
@@ -1291,8 +1416,45 @@
     } else {
       sidebar.style("width", "30px").style("padding", "30px 0px");
       sidebarInnerContent.style("display", "none");
-      collapseBtn.text("▶").style("left", "14px"); 
+      collapseBtn.text("▶").style("left", "14px");
     }
+
+    // Drive the map translate in lock-step with the CSS sidebar transition using
+    // a requestAnimationFrame loop.  Each frame we read the sidebar's current
+    // rendered width, derive how much the SVG canvas has grown/shrunk relative to
+    // its pre-transition size, and immediately apply the matching translateX
+    // correction — no D3 transition needed because the loop itself is the animation.
+    //
+    // The geographic centre stays fixed because:
+    //   newTx = tBefore.x + (currentSvgWidth - wBefore) / 2
+    //
+    // The loop stops itself once the sidebar width has settled (two consecutive
+    // frames with < 0.5 px change) so it doesn't run forever.
+    const SIDEBAR_TRANSITION_MS = 400;
+    const rafDeadline = performance.now() + SIDEBAR_TRANSITION_MS + 50; // safety cap
+    let prevSidebarW  = sidebar.node() ? sidebar.node().getBoundingClientRect().width : 0;
+    let settledFrames = 0;
+
+    (function trackLoop(now) {
+      const svgNode = svg.node();
+      if (!svgNode) return;
+
+      const sidebarNode = sidebar.node();
+      const curSidebarW = sidebarNode ? sidebarNode.getBoundingClientRect().width : prevSidebarW;
+      const curSvgW     = svgNode.clientWidth;
+      const delta       = curSvgW - wBefore;
+
+      // Apply correction immediately — no transition, the rAF loop IS the animation
+      zoom.transform(svg, d3.zoomIdentity.translate(tBefore.x + delta / 2, tBefore.y).scale(tBefore.k));
+
+      // Stop once the sidebar stops moving (settled) or the deadline is reached
+      const moved = Math.abs(curSidebarW - prevSidebarW);
+      prevSidebarW = curSidebarW;
+      if (moved < 0.5) { settledFrames++; } else { settledFrames = 0; }
+      if (settledFrames < 3 && now < rafDeadline) {
+        requestAnimationFrame(trackLoop);
+      }
+    })(performance.now());
   }
 
   // ─── SECTION 12: LEGEND RENDERING ────────────────────────────────────────
@@ -1490,7 +1652,7 @@
     const BAR_WIDTH = svgEl ? parseFloat(svgEl.getAttribute("width")) : 280;
     const markerG = d3.select("#legend-marker");
     if (markerG.empty()) return;
-    
+
     if (val === null || val === undefined || val <= 0) {
       // If hovering away and a region is still selected, keep the marker at the selected value
       if (!persistent && state.selectedFeature) {
@@ -1500,14 +1662,14 @@
       markerG.style("display", "none");
       return;
     }
-    
+
     // Normalise the value to a 0–1 position along the bar
     const t = Math.max(0, Math.min(1, (val - state.legendMin) / (state.legendMax - state.legendMin)));
     const xPos = t * BAR_WIDTH;
-    
+
     markerG.style("display", null);
     markerG.select("#legend-marker-line").attr("x1", xPos).attr("x2", xPos);
-    
+
     // Persistent markers (selected region) are fully opaque; hover markers are translucent
     const lineColour = state.isDark
       ? (persistent ? "#ffffff"       : "rgba(255,255,255,0.6)")
@@ -1542,7 +1704,7 @@
     // Get the filtered count for every region; ignore regions with zero matches
     const values = fixedData.features.map(d => getFilteredValue(d)).filter(v => v > 0);
     const minVal = d3.min(values) ?? 0; const maxVal = d3.max(values) ?? 1;
-    
+
     // Build a sequential colour scale mapping [minVal, maxVal] → colour.
     // Adding 1 to the max avoids a zero-width domain if all counts are equal.
     const colourScale = d3.scaleSequential([minVal, Math.max(maxVal, minVal + 1)], COLOUR_THEMES[state.currentTheme]);
@@ -1671,7 +1833,7 @@
             if (!hasAnyData(d)) { restoreMapAppearance(); return; }
 
             // Clicking the already-selected region deselects it (toggle off)
-            if (state.selectedFeature === d) { restoreMapAppearance(); return; }
+            if (state.selectedFeature === d) { mobileCloseRegion(); return; }
 
             // Reset the skeleton flag whenever the selected region changes so
             // buildCloseButton() creates a fresh button rather than appending a
@@ -1692,22 +1854,16 @@
               updateSidebarToggle();
             }
 
-            // Cancel any in-flight restore transition before applying new state.
-            // A single interrupt() cancels all transitions (named and unnamed).
-            cdPaths.interrupt();
-
-            // Dim all regions except the clicked one via a short transition so
-            // D3 batches DOM writes through rAF rather than blocking the main thread.
+            // Cancel any in-flight D3 transitions and set a clean baseline.
+            // Opacity is animated by CSS transition on path.cd-region, so we
+            // just set the target values directly — no D3 transition needed.
             const clicked = this;
             const _selectK = d3.zoomTransform(svg.node()).k;
-            cdPaths
-              .filter(function() { return this !== clicked; })
-              .transition("select").duration(80)
-              .style("opacity", 0.35)
+            cdPaths.interrupt()
+              .style("opacity", function() { return this === clicked ? 1 : 0.35; })
               .attr("stroke", c.bg)
               .attr("stroke-width", 0.5 / _selectK);
             d3.select(this)
-              .interrupt()
               .style("opacity", 1)
               .attr("stroke", c.accent2)
               .attr("stroke-width", 2 / _selectK)
@@ -2137,7 +2293,7 @@
     if (!donutEl) return;
     d3.select(donutEl).selectAll("*").remove();
     if (!industryData.length) return;
-    
+
     // ─── Donut Chart ──────────────────────────────────────────────────────────
     //  Draws a donut chart showing the breakdown of facilities by defence industry.
     //  Hovering/tapping a slice updates the centre label to show that industry's count.
@@ -2154,15 +2310,15 @@
     const svgD = d3.select("#donut-chart").append("svg").attr("width", SIZE).attr("height", SIZE + 20).style("overflow", "visible");
     // Centre group — all paths and labels are relative to the donut's centre
     const g = svgD.append("g").attr("transform", `translate(${RADIUS},${RADIUS})`);
-    
+
     // Centre label: shows total facility count by default; updates on hover/tap
     const cVal = g.append("text").attr("text-anchor", "middle").attr("dy", "-0.15em").style("font-size", "22px").style("font-weight", "600").style("fill", c.text).style("font-family", "Inter");
     const cLab = g.append("text").attr("text-anchor", "middle").attr("dy", "1.1em").style("font-size", "9px").style("font-weight", "500").style("letter-spacing", "1px").style("fill", c.muted).style("font-family", "Inter");
 
     // showDefault restores the centre label to the total count when not interacting
-    const showDefault = () => { 
-      cVal.text(activeLocalFacilities.length.toLocaleString()); 
-      cLab.text(activeLocalFacilities.length === 1 ? "FACILITY" : "FACILITIES"); 
+    const showDefault = () => {
+      cVal.text(activeLocalFacilities.length.toLocaleString());
+      cLab.text(activeLocalFacilities.length === 1 ? "FACILITY" : "FACILITIES");
     };
     showDefault();
 
@@ -2590,15 +2746,15 @@
     // Bulleted usage tips
     const tipsList = [
       "Tap/click a census division to view a broad-scale defence manufacturing industry overview.",
-	  "Within a census division, facility operations types can be expanded by clicking on each row or by clicking on the ▼.",
+    "Within a census division, facility operations types can be expanded by clicking on each row or by clicking on the ▼.",
       "Use the Operations Filters to narrow results by facility type.",
       'Use the Industry Filters to include ✓ or exclude ✕ specific defence industry sectors served. Industry Filters can be combined using "AND"/"OR" logic.',
-	  "Browse the map using your mouse or touch-screen device, with the ability to pinch to zoom, scroll wheel to zoom, or by using the Zoom in (+) and Zoom out (-) buttons.",
-	  "Click the Home icon (⌂) to instantly reset the map back to the default national view.",
+    "Browse the map using your mouse or touch-screen device, with the ability to pinch to zoom, scroll wheel to zoom, or by using the Zoom in (+) and Zoom out (-) buttons.",
+    "Click the Home icon (⌂) to instantly reset the map back to the default national view.",
       "Use the colour theme buttons in the legend to change the choropleth map palette.",
-	  "Toggle between dark mode (☾) and light mode (☼) display themes using the display theme button.",
+    "Toggle between dark mode (☾) and light mode (☼) display themes using the display theme button.",
     ];
-	// Display each usage tip in a bulleted list
+  // Display each usage tip in a bulleted list
     tipsList.forEach(tip => {
       const row = infoModal.append("div").style("display", "flex").style("gap", "8px").style("margin-bottom", "10px").style("align-items", "flex-start");
       row.append("span").style("color", c.accent).style("font-size", "10px").style("margin-top", "2px").text("▸");
@@ -2618,14 +2774,14 @@
         .style("color", c.accent)
         .style("text-decoration", "underline")
         .text("click here.");
-		
-	infoModal.append("p")
-	  .style("font-size", "12px")
+
+  infoModal.append("p")
+    .style("font-size", "12px")
       .style("color", c.muted)
       .style("line-height", "1.6")
       .text("For more information about the Trillium Network for Advanced Manufacturing, please visit ")
-	  .append("a")
-		.attr("href", "https://trilliummfg.ca/")
+    .append("a")
+    .attr("href", "https://trilliummfg.ca/")
         .attr("target", "_blank")
         .style("color", c.accent)
         .style("text-decoration", "underline")
@@ -2805,7 +2961,7 @@
     }
     announceFilterUpdate();
   }
-  
+
   // Re-renders the map and refreshes filter chips after any filter change.
   // Also refreshes the detail panel so the donut chart and counts stay in sync.
   function applyFilterAndCheckZoom() {
@@ -2827,19 +2983,16 @@
   //  the "Close Census Division Details" / ✕ button.
   function restoreMapAppearance() {
     const c = getC();
-    const wasSelected = !!state.selectedFeature;
     state.selectedFeature = null;
     _detailSkeletonBuilt = false; // Force a full skeleton rebuild on the next region selection
     d3.select("#legend-marker").style("display", "none");
     // Re-enable the operations/industry selectors (they may have been locked)
     d3.select("#analytics-selector").property("disabled", false).style("opacity", "1").style("cursor", "pointer");
     d3.select("#industry-selector").style("pointer-events", "auto").style("opacity", "1");
-    // Cancel any in-flight "select" dim transition, then animate back to full
-    // opacity. A single interrupt() cancels all transitions including named ones.
-    cdPaths.interrupt();
+    // Cancel any in-flight D3 transitions and restore all paths to full opacity.
+    // The CSS transition on path.cd-region handles the animation.
     const _restoreK = d3.zoomTransform(svg.node()).k;
-    cdPaths
-      .transition("restore").duration(600)
+    cdPaths.interrupt()
       .style("opacity", 1)
       .attr("stroke", c.bg)
       .attr("stroke-width", 0.5 / _restoreK);
@@ -2850,6 +3003,40 @@
       updateSidebarToggle();
     }
     updateSidebarDetail(); // Reverts detail panel to the "select a region" prompt
+  }
+
+  // On mobile, closing a selected region should zoom to fit it in the full screen
+  // (sheet gone) before clearing the selection — mirroring what the ✕ button does.
+  // Call this instead of restoreMapAppearance() directly from tap/keyboard paths.
+  function mobileCloseRegion() {
+    if (!isMobile() || !state.selectedFeature) { restoreMapAppearance(); return; }
+    const feat = state.selectedFeature;
+    _isFullscreen = false;
+    state.sidebarOpen = false;
+    updateSidebarToggle();
+    setTimeout(() => {
+      const svgNode = svg.node();
+      const w = svgNode ? svgNode.clientWidth : WIDTH;
+      const h = svgNode ? svgNode.clientHeight : HEIGHT;
+      const [[x0, y0], [x1, y1]] = path.bounds(feat);
+      const dx = x1 - x0; const dy = y1 - y0;
+      const legendNode  = legendOverlay.node();
+      const legendRect  = legendNode ? legendNode.getBoundingClientRect() : null;
+      const svgTop      = svgNode ? svgNode.getBoundingClientRect().top : 0;
+      const legendBottom = legendRect ? legendRect.bottom - svgTop + 8 : 164;
+      const safeTop     = Math.min(legendBottom, h * 0.5);
+      const safeH       = h - safeTop;
+      const centreFrac  = isLandscapeMobile() ? 0.30 : 0.35;
+      const safeCentreY = safeTop + safeH * centreFrac;
+      const currentScale = d3.zoomTransform(svg.node()).k;
+      const targetScale  = Math.min(12, 0.70 / Math.max(dx / w, dy / safeH));
+      const scale        = Math.max(currentScale, targetScale);
+      const tx = w / 2 - scale * ((x0 + x1) / 2);
+      const ty = safeCentreY - scale * ((y0 + y1) / 2);
+      _isProgrammaticZoom = true;
+      svg.transition().duration(500).call(zoom.transform, d3.zoomIdentity.translate(tx, ty).scale(scale));
+      restoreMapAppearance();
+    }, 80);
   }
 
   // Clears the selected region AND zooms out to the full-Canada view.
@@ -2871,34 +3058,34 @@
   let _resizeTimer = null;
 
   function _doRebuild() {
-	// isMobile() is now fixed at load time, so crossedBreakpoint will never be
-	// true and the teardown block below is effectively dead code. Left in place
-	// in case the freeze is ever removed.
-	const nowMobile = isMobile();
-	const crossedBreakpoint = nowMobile !== _lastIsMobile;
-	_lastWidth   = window.innerWidth;
-	_lastHeight  = window.innerHeight;
-	_lastIsMobile = nowMobile;
+    // isMobile() is now fixed at load time, so crossedBreakpoint will never be
+    // true and the teardown block below is effectively dead code. Left in place
+    // in case the freeze is ever removed.
+    const nowMobile = isMobile();
+    const crossedBreakpoint = nowMobile !== _lastIsMobile;
+    _lastWidth    = window.innerWidth;
+    _lastHeight   = window.innerHeight;
+    _lastIsMobile = nowMobile;
 
-	if (crossedBreakpoint) {
-		controlsDiv.selectAll("*").remove();
-		_controlsBuilt = false;
-		_detailSkeletonBuilt = false;
-		}
+    if (crossedBreakpoint) {
+      controlsDiv.selectAll("*").remove();
+      _controlsBuilt = false;
+      _detailSkeletonBuilt = false;
+    }
 
-	// When the viewport height crosses the short-sidebar threshold, the detail
-	// panel layout switches between stacked and side-by-side. Force a skeleton
-	// rebuild so the new layout takes effect immediately.
-	const nowShort = isSidebarShort();
-	if (nowShort !== _lastIsSidebarShort) {
-		_detailSkeletonBuilt = false;
-		_lastIsSidebarShort = nowShort;
-	}
+    // When the viewport height crosses the short-sidebar threshold, the detail
+    // panel layout switches between stacked and side-by-side. Force a skeleton
+    // rebuild so the new layout takes effect immediately.
+    const nowShort = isSidebarShort();
+    if (nowShort !== _lastIsSidebarShort) {
+      _detailSkeletonBuilt = false;
+      _lastIsSidebarShort = nowShort;
+    }
 
-	updateUI();
-	renderMap();
-	zoomToFull(false); // Refit projection to new container size after resize
-}
+    updateUI();
+    renderMap();
+    zoomToFull(false); // Refit projection to new container size after resize
+  }
 
   window.addEventListener("resize", () => {
     if (window.innerWidth === _lastWidth && window.innerHeight === _lastHeight) return;
@@ -2919,7 +3106,7 @@
   // Enter / Space: when hovering a region with the mouse, activate it as if clicked.
   window.addEventListener("keydown", (event) => {
     if (event.key === "Escape" || event.key === "Esc") {
-      if (state.selectedFeature) restoreMapAppearance();
+      if (state.selectedFeature) mobileCloseRegion();
       return;
     }
     if (event.key === "Enter" || event.key === " ") {
@@ -2966,8 +3153,9 @@
 
   updateUI();
   renderMap();
-  // Defer the initial fit by one frame so the browser has finished laying out
-  // the sidebar and map container — otherwise clientWidth/clientHeight are 0
-  // or reflect the wrong size and Canada appears off-centre on first load.
-  requestAnimationFrame(() => zoomToFull(false));
+  // Defer the initial fit by two frames: the first lets the browser finish
+  // laying out the sidebar and map container (so clientWidth/clientHeight are
+  // correct), the second ensures the legend overlay has been painted and has a
+  // non-zero offsetHeight so the legend-overlap compensation fires correctly.
+  requestAnimationFrame(() => requestAnimationFrame(() => zoomToFull(false)));
 })(); // The outer function is invoked immediately — the map loads as soon as the script runs
