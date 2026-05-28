@@ -2899,7 +2899,7 @@
       .style("color", c.muted)
       .style("line-height", "1.6")
       .style("margin-bottom", "20px")
-      .text("This map visualizes the geographic distribution of defence manufacturing and related facilities across Canada, aggregated by Census Division.");
+      .text("This map visualizes the geographic distribution of defence-capable manufacturing, technology development, and related facilities across Canada, aggregated by Census Division.");
 
     infoModal.append("div").style("font-size", "10px").style("font-weight", "600").style("letter-spacing", "1.5px").style("color", c.muted).style("margin-bottom", "10px").text("HOW TO USE");
 
@@ -2945,7 +2945,19 @@
       .style("font-size", "12px")
       .style("color", c.muted)
       .style("line-height", "1.6")
-      .text("Facility-level data was collected as part of a national defence facility identification project, and has been aggregated here at the Census Division level. Geographic data is based on the Statistics Canada Census Subdivision Boundary File. For more detailed data descriptions, download links, and code availability, please ")
+      .text("Facility-level data was collected as part of a national defence-capable facility identification project, and has been aggregated here at the Census Division level. Defence facilities as qualified for this project are those currently serving or certified to serve Canada's defence industry. At the highest level facilities were classified by their primary activity, either as a Manufacturer, Technology Development & Other Related Facilities, or as a Maintenance, Repair, and Overhaul (MRO)/In-Service Support (ISS). A consequence of this is that some significant but not primarily MRO/ISS facilities are represented under the Technology Development & Other Related Facilities category. The data presented here represents the full depth of the facility data collected, but only a subset of the breadth of that data.");
+		
+	infoModal.append("p")
+      .style("font-size", "12px")
+      .style("color", c.muted)
+      .style("line-height", "1.6")
+      .text("Geographic data is based off the Statistics Canada Census Subdivision Boundary File.");
+		
+	infoModal.append("p")
+      .style("font-size", "12px")
+      .style("color", c.muted)
+      .style("line-height", "1.6")
+      .text("For more detailed data descriptions, download links, and code availability, please ")
       .append("a")
         .attr("href", "https://github.com/riley-kemp/defence-map")
         .attr("target", "_blank")
