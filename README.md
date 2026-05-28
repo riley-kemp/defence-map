@@ -2,7 +2,7 @@
 
 ## Map Objective
 
-This map came about through a project done at the [Trillium Network for Advanced Manufacturing](https://trilliummfg.ca/) to create a complete (or as complete as possible) directory of Canadian defence manufacturers, as well as any defence-related Value-Add/Technology and federally certified Maintenance, Repair, and Overhaul (MRO) facilities. 
+This map came about through a project done at the [Trillium Network for Advanced Manufacturing](https://trilliummfg.ca/) to create a complete (or as complete as possible) directory of Canadian defence manufacturers, as well as any defence-related Value-Add/Technology and federally certified Maintenance, Repair, and Overhaul (MRO) facilities. Defence facilities as qualified for this project are those currently serving or certified to serve Canada's defence industry.
 
 The data presented here represents the full depth of the facility data collected, but only a subset of the breadth of the facility data. It is also the case that single companies may have multiple defence facilities represented here.
 
