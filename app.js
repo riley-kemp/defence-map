@@ -461,6 +461,11 @@
     #control-panel button:focus {
       outline: none;
     }
+    /* Remove the thin frame some browsers draw on :active/:focus for the ? help button */
+    #industry-info-btn {
+      outline: none;
+      box-shadow: none;
+    }
     button:focus-visible {
       outline: 3px solid #00a94f;
       outline-offset: 2px;
@@ -1026,7 +1031,7 @@
   // Two content sections inside the sidebar:
   //   controlsDiv — the filter chips and heading (always visible)
   //   detailsDiv  — the census division detail panel (shown after clicking a region)
-  const controlsDiv = sidebarInnerContent.append("div").style("margin-bottom", "40px");
+  const controlsDiv = sidebarInnerContent.append("div").style("margin-bottom", "40px").style("position", "relative");
   const detailsDiv  = sidebarInnerContent.append("div");
 
 
@@ -1981,7 +1986,7 @@
         .style("font-size", "14px")
         .style("font-weight", "400")
         .style("padding-bottom", "32px")
-        .text("Select a census division from the map to analyse specific defence industry metrics.");
+        .text("Select a census division from the map to analyse detailed defence industry metrics.");
       return;
     }
 
@@ -2559,20 +2564,166 @@
     });
 
     // ── Industry Filters section header + AND/OR toggle + reset button ──
+    // The label itself is the help affordance (hover/tap to show tooltip).
+    // margin-left:auto on modeToggleDiv pushes AND/OR + reset to the far right.
     const filterHeader = controlsDiv.append("div")
       .style("display", "flex")
-      .style("justify-content", "space-between")
       .style("align-items", "stretch")
       .style("margin-top", "20px")
       .style("margin-bottom", "10px");
 
-    filterHeader.append("div")
+    // ── "INDUSTRY FILTERS" label — doubles as the tooltip trigger ──
+    // Dotted underline + cursor:help signals interactivity without a separate button.
+    const filterLabelGroup = filterHeader.append("div")
+      .style("display", "flex")
+      .style("align-items", "center")
+      .style("flex", "0 0 auto")
+      .style("align-self", "center");
+
+    const industryInfoBtn = filterLabelGroup.append("span")
+      .attr("id", "industry-info-btn")
+      .attr("role", "button")
+      .attr("tabindex", "0")
+      .attr("aria-label", "Industry filter help")
       .text("INDUSTRY FILTERS")
       .style("font-size", "10px")
       .style("font-weight", "600")
       .style("letter-spacing", "1.5px")
       .style("color", c.muted)
-      .style("align-self", "center");
+      .style("cursor", "help")
+      .style("text-decoration", "underline")
+      .style("text-decoration-style", "dotted")
+      .style("text-underline-offset", "3px")
+      .style("transition", "color 0.15s ease")
+      .style("user-select", "none");
+
+
+    // The tooltip is a sibling of filterHeader inside controlsDiv (not a child
+    // of the button) so it never contributes to the button's layout size.
+    // controlsDiv already has position:relative from the sidebar layout.
+    const industryInfoTip = controlsDiv.append("div")
+      .attr("id", "industry-info-tip")
+      .style("position", "absolute")
+      .style("top", "auto")   // overridden by JS when shown
+      .style("left", "16px")
+      .style("z-index", "300")
+      .style("min-width", "220px")
+      .style("max-width", "260px")
+      .style("padding", "10px 12px")
+      .style("border-radius", "6px")
+      .style("box-shadow", "0 4px 16px rgba(0,0,0,0.18)")
+      .style("pointer-events", "none")   // tooltip never intercepts clicks
+      .style("display", "none")          // hidden by default
+      .style("font-family", "'Inter', sans-serif");
+
+    // Tooltip inner content
+    [
+	  { icon: "•", iconColor: "#6b7280", label: "Any", desc: "Show regions regardless of this industry."},
+      { icon: "✓", iconColor: c.accent, label: "Include", desc: "Show regions that match this industry."},
+      { icon: "✕", iconColor: state.isDark ? "#fca5a5" : "#dc2626", label: "Exclude", desc: "Hide regions that match this industry."},
+    ].forEach(({ icon, iconColor, label, desc }) => {
+      const row = industryInfoTip.append("div")
+        .style("display", "flex")
+        .style("align-items", "flex-start")
+        .style("gap", "7px")
+        .style("margin-bottom", "7px");
+      row.append("span")
+        .style("font-size", "11px").style("font-weight", "700")
+        .style("color", iconColor).style("flex-shrink", "0").style("line-height", "1.5")
+		.style("width", "12px")          // Forces a consistent width for all symbols
+	    .style("display", "inline-flex") // Allows centering inside the span
+	    .style("justify-content", "center")
+        .text(icon);
+      const textCol = row.append("div");
+      textCol.append("span")
+        .style("font-size", "11px").style("font-weight", "600").style("color", c.text)
+        .text(label + ": ");
+      textCol.append("span")
+        .style("font-size", "11px").style("color", c.muted)
+        .text(desc);
+    });
+
+    industryInfoTip.append("div")
+      .style("font-size", "10px")
+      .style("color", c.muted)
+      .style("font-style", "italic")
+      .style("border-top", `1px solid ${c.border}`)
+      .style("padding-top", "7px")
+      .style("margin-top", "2px")
+      .text('Industry filters set to "Include" can be combined using AND/OR logic.');
+
+    // Helper to apply theme colours to the tooltip (called on build + theme refresh)
+    function _styleInfoTip() {
+      const cc = getC();
+      industryInfoTip
+        .style("background", cc.surface)
+        .style("border", `1px solid ${cc.border}`)
+        .style("color", cc.text);
+      // Update icon, label, and description span colours inside the tip
+      industryInfoTip.selectAll("span").each(function() {
+        const el = d3.select(this);
+        const t = el.text();
+        if (t === "✓") { el.style("color", cc.accent); return; }
+        if (t === "✕") { el.style("color", state.isDark ? "#fca5a5" : "#dc2626"); return; }
+        if (t === "•") { el.style("color", cc.muted); return; }
+        // Label spans end with ": " (e.g. "Any: ", "Include: ", "Exclude: ")
+        if (t.endsWith(": ")) { el.style("color", cc.text); return; }
+        // All other spans are description text
+        el.style("color", cc.muted);
+      });
+      // Update footer note colours (the border-top divider div)
+      industryInfoTip.select("div[style*='border-top']").each(function() {
+        d3.select(this).style("color", cc.muted).style("border-top", `1px solid ${cc.border}`);
+      });
+    }
+    _styleInfoTip();
+
+    // Track open state for click-toggle (used on mobile)
+    let _infoTipOpen = false;
+
+    function _showInfoTip() {
+      _styleInfoTip();
+      // Position the tooltip just below the ⓘ button.
+      // We measure the button and controlsDiv rects so the tip lands correctly
+      // regardless of scroll position or sidebar layout.
+      const btnRect  = industryInfoBtn.node().getBoundingClientRect();
+      const divRect  = controlsDiv.node().getBoundingClientRect();
+      const tipTop   = (btnRect.bottom - divRect.top) + 6;
+      const tipLeft  = (btnRect.left   - divRect.left);
+      industryInfoTip
+        .style("top",  tipTop  + "px")
+        .style("left", tipLeft + "px")
+        .style("display", "block");
+      industryInfoBtn.style("color", getC().accent).style("text-decoration-color", getC().accent);
+    }
+    function _hideInfoTip() {
+      industryInfoTip.style("display", "none");
+      industryInfoBtn.style("color", getC().muted).style("text-decoration-color", "");
+      _infoTipOpen = false;
+    }
+
+    if (_setupMobile) {
+      // Mobile: tap toggles the tooltip
+      onTap(industryInfoBtn, function(event) {
+        event.stopPropagation();
+        _infoTipOpen = !_infoTipOpen;
+        _infoTipOpen ? _showInfoTip() : _hideInfoTip();
+      });
+      // Tapping anywhere else closes it
+      document.addEventListener("pointerdown", function _closeTip(e) {
+        if (!industryInfoBtn.node().contains(e.target)) {
+          _hideInfoTip();
+        }
+      }, { passive: true });
+    } else {
+      // Desktop: hover shows/hides the tooltip
+      industryInfoBtn
+        .on("mouseenter.infotip", _showInfoTip)
+        .on("mouseleave.infotip", _hideInfoTip);
+    }
+
+    // Expose re-theme helper so refreshControlsState can update tooltip colours on theme change
+    industryInfoBtn.node()._styleInfoTip = _styleInfoTip;
 
     // AND/OR mode toggle — controls whether all included industries must match (AND)
     // or just one needs to match (OR). Greyed out until at least one industry is included.
@@ -2581,6 +2732,7 @@
       .style("display", "flex")
       .style("align-items", "stretch")
       .style("gap", "2px")
+      .style("margin-left", "auto")
       .style("margin-right", "12px");
 
     ["and", "or"].forEach(mode => {
@@ -2732,7 +2884,7 @@
       .style("color", c.accent)
       .style("font-family", "'Inter', sans-serif")
       .style("margin-bottom", "14px")
-      .text("Canadian Defence Map");
+      .text("Canadian Defence Manufacturing Industry Map");
 
     infoModal.append("p")
       .style("font-size", "12px")
@@ -2743,22 +2895,40 @@
 
     infoModal.append("div").style("font-size", "10px").style("font-weight", "600").style("letter-spacing", "1.5px").style("color", c.muted).style("margin-bottom", "10px").text("HOW TO USE");
 
-    // Bulleted usage tips
-    const tipsList = [
-      "Tap/click a census division to view a broad-scale defence manufacturing industry overview.",
-    "Within a census division, facility operations types can be expanded by clicking on each row or by clicking on the ▼.",
-      "Use the Operations Filters to narrow results by facility type.",
-      'Use the Industry Filters to include ✓ or exclude ✕ specific defence industry sectors served. Industry Filters can be combined using "AND"/"OR" logic.',
-    "Browse the map using your mouse or touch-screen device, with the ability to pinch to zoom, scroll wheel to zoom, or by using the Zoom in (+) and Zoom out (-) buttons.",
-    "Click the Home icon (⌂) to instantly reset the map back to the default national view.",
-      "Use the colour theme buttons in the legend to change the choropleth map palette.",
-    "Toggle between dark mode (☾) and light mode (☼) display themes using the display theme button.",
+	const tipsList = [
+      "Tap or click any shaded census division to open a detailed breakdown of defence facilities in that region, including an industry sector served donut chart and facility operations type counts.",
+      "Within a selected census division breakdown, expand each facility operation type row (Manufacturers, Technology, MRO) by clicking the row or the ▼ arrow to see a breakdown by industry sub-sector (3-digit NAICS).",
+      "Use the Operations Filters to narrow the map to specific facility types: Manufacturers, Technology & Value-Add facilities, or Maintenance, Repair & Overhaul (MRO/ISS) facilities. Multiple types can be selected simultaneously.",
+      [
+        { text: "Use the Industry Filters to focus on specific defence sectors. Click a chip once (" },
+        { text: "✓", color: c.accent },
+        { text: ") to include only regions serving that sector, click again (" },
+        { text: "✕", color: state.isDark ? "#fca5a5" : "#dc2626", id: "info-tip-exclude-icon" },
+        { text: ") to exclude those regions, and a third time to clear it. Combine multiple included sectors using AND (all must match) or OR (any must match) logic."},
+      ],
+      "Navigate the map by pinching, dragging and tapping on touch screens, or by scrolling, dragging and clicking on other devices. Use the + and − buttons for step-by-step zoom control.",
+	  "Toggle between light (☾) and dark (☼) display themes using the theme button in the top-right control panel.",
+      "Click the Home button (⌂) to reset the map to the full national view.",
+	  "Use the ⟳ button to reset all active filters at once.",
+      "Change the maps choropleth colour palette using the theme buttons in the map legend."
+
     ];
-  // Display each usage tip in a bulleted list
+    // Display each usage tip in a bulleted list
     tipsList.forEach(tip => {
       const row = infoModal.append("div").style("display", "flex").style("gap", "8px").style("margin-bottom", "10px").style("align-items", "flex-start");
       row.append("span").style("color", c.accent).style("font-size", "10px").style("margin-top", "2px").text("▸");
-      row.append("span").style("font-size", "12px").style("color", c.muted).style("line-height", "1.5").text(tip);
+      const textSpan = row.append("span").style("font-size", "12px").style("color", c.muted).style("line-height", "1.5");
+      if (typeof tip === "string") {
+        textSpan.text(tip);
+      } else {
+        tip.forEach(seg => {
+          textSpan.append("span")
+            .attr("id", seg.id ?? null)
+            .style("color", seg.color ?? c.muted)
+            .style("font-weight", seg.color ? "700" : null)
+            .text(seg.text);
+        });
+      }
     });
 
     infoModal.append("div").style("margin-top", "24px").style("font-size", "10px").style("font-weight", "600").style("letter-spacing", "1.5px").style("color", c.muted).style("margin-bottom", "8px").text("DATA SOURCES");
@@ -2850,6 +3020,21 @@
        .style("cursor",         industriesActive ? "pointer" : "default")
        .style("opacity",        industriesActive ? "1" : "0.3")
        .style("pointer-events", industriesActive ? "auto" : "none");
+
+    // ── Re-theme the industry info tooltip if it has been built ──
+    const infoBtn = document.getElementById("industry-info-btn");
+    if (infoBtn?._styleInfoTip) infoBtn._styleInfoTip();
+    // Also keep the label's idle colour in sync with the current muted tone
+    d3.select("#industry-info-btn").style("color", c.muted);
+
+    // ── Re-theme the info panel (About this map) close button ──
+    d3.select(".info-sidebar button")
+      .style("color",  c.muted)
+      .style("border", `1px solid ${c.border}`);
+
+    // ── Re-theme the ✕ icon in the industry filter usage tip ──
+    d3.select("#info-tip-exclude-icon")
+      .style("color", state.isDark ? "#fca5a5" : "#dc2626");
 
     // ── Industry chips: green for include, red for exclude, grey for inactive ──
     d3.selectAll("[data-ind-key]").each(function() {

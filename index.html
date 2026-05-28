@@ -20,7 +20,7 @@
 			display: flex;
 			position: relative;
 		}
-		
+
 		:root {
 		  --bg:          #f8f9fa;
 		  --surface:     #ffffff;
@@ -77,22 +77,22 @@
 			opacity: 0;
 			pointer-events: none;
 		}
-		/* Contents start invisible and fade in together once the logo is cached */
+		/* Spinner and text are always visible; only the logo fades in once loaded */
 		#map-loading-inner {
 			display: flex;
 			flex-direction: column;
 			align-items: center;
 			gap: 20px;
-			opacity: 0;
-			transition: opacity 0.3s ease;
-		}
-		#map-loading-inner.ready {
-			opacity: 1;
 		}
 		#loading-logo {
 			width: 160px;
 			height: auto;
 			display: block;
+			opacity: 0;
+			transition: opacity 0.3s ease;
+		}
+		#loading-logo.ready {
+			opacity: 1;
 		}
 		.map-spinner {
 			width: 36px;
@@ -117,7 +117,7 @@
 			body, html { background-color: #0e1117; }
 			#map-loading { background: #0e1117; }
 			.map-loading-text { color: #6b7280; }
-			body.dark #map-loading {background: #0e1117;}
+			body.dark #map-loading { background: #0e1117; }
 		}
 	</style>
 </head>
@@ -134,12 +134,16 @@
     </div>
 
     <script>
-      // Determine theme, build the correct logo URL, then pre-fetch it via a
-      // hidden Image() object. Only once the SVG has fully downloaded do we
-      // assign it to the visible <img> and fade in the whole inner group —
-      // so the logo, spinner, and text all appear together in one clean reveal.
-      // If the fetch fails (e.g. offline) we still reveal the spinner so the
-      // user isn't stuck on a blank screen.
+      // The spinner and loading text are visible immediately — no opacity:0 on the
+      // wrapper. This script only handles fading in the logo once it has loaded.
+      //
+      // The logo is hosted on raw.githubusercontent.com, which serves SVGs with
+      // Content-Type: text/plain. Chrome blocks SVGs with the wrong MIME type when
+      // loaded via <img>, so we fetch the file as a blob and re-wrap it with the
+      // correct image/svg+xml type before assigning it as an object URL.
+      //
+      // A 4-second timeout hides the logo slot silently if the fetch is too slow,
+      // so the spinner is never blocked from being visible.
       (function() {
         var dark = window.matchMedia && window.matchMedia("(prefers-color-scheme: dark)").matches;
         var base = "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/assets/";
@@ -147,18 +151,28 @@
           ? base + "Trillium_full_color_ondark.svg"
           : base + "Trillium_full_color_onlight.svg";
 
-        function reveal(src) {
-          var logo  = document.getElementById("loading-logo");
-          var inner = document.getElementById("map-loading-inner");
-          if (src) logo.src = src;
-          // rAF ensures the src assignment has been painted before the fade starts
-          requestAnimationFrame(function() { inner.classList.add("ready"); });
+        var done = false;
+        function revealLogo(objectUrl) {
+          if (done) return;
+          done = true;
+          if (!objectUrl) return; // logo failed or timed out — spinner already visible
+          var logo = document.getElementById("loading-logo");
+          logo.src = objectUrl;
+          requestAnimationFrame(function() { logo.classList.add("ready"); });
         }
 
-        var img = new Image();
-        img.onload  = function() { reveal(url); };
-        img.onerror = function() { reveal(null); }; // show spinner even if logo fails
-        img.src = url;
+        // If the fetch hasn't resolved in 4 s, give up and just show the spinner
+        var timer = setTimeout(function() { revealLogo(null); }, 4000);
+
+        fetch(url)
+          .then(function(r) { return r.ok ? r.blob() : Promise.reject(); })
+          .then(function(blob) {
+            // Re-wrap with explicit SVG MIME type so Chrome renders it correctly
+            var svgBlob = new Blob([blob], { type: "image/svg+xml" });
+            clearTimeout(timer);
+            revealLogo(URL.createObjectURL(svgBlob));
+          })
+          .catch(function() { clearTimeout(timer); revealLogo(null); });
       })();
     </script>
 
