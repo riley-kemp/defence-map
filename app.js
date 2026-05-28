@@ -1444,6 +1444,11 @@
       const svgNode = svg.node();
       if (!svgNode) return;
 
+      // If a zoomToFeature transition is running, stop the centre-lock loop —
+      // continuing would overwrite the feature-zoom transform every frame and
+      // prevent the map from ever reaching the selected region.
+      if (_isProgrammaticZoom) return;
+
       const sidebarNode = sidebar.node();
       const curSidebarW = sidebarNode ? sidebarNode.getBoundingClientRect().width : prevSidebarW;
       const curSvgW     = svgNode.clientWidth;
@@ -1874,8 +1879,11 @@
               .attr("stroke-width", 2 / _selectK)
               .raise();
 
-            zoomToFeature(d, _sidebarWasClosed);
             updateSidebarDetail();
+            // zoomToFeature sets _isProgrammaticZoom = true, which causes the
+            // trackLoop inside updateSidebarToggle to exit immediately — so the
+            // two animations no longer fight each other.
+            zoomToFeature(d, _sidebarWasClosed);
 
             if (isMobile()) {
               setTimeout(() => {
@@ -3310,8 +3318,8 @@
       cdPaths
         .filter(p => p === d)
         .style("opacity", 1).attr("stroke", getC().accent2).attr("stroke-width", 2 / d3.zoomTransform(svg.node()).k).raise();
-      zoomToFeature(d, _kbSidebarWasClosed);
       updateSidebarDetail();
+      zoomToFeature(d, _kbSidebarWasClosed);
       tooltip.style("visibility", "hidden");
     }
   });
