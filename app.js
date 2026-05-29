@@ -2,8 +2,8 @@
 // ════════════════════════════════════════════════════════════════════════════
 //  CANADA DEFENCE MAP — app.js
 //  This file builds and runs an interactive map showing where defence
-//  manufacturing facilities are located across Canada, broken down by
-//  Census Division (a geographic unit slightly larger than a county).
+//  manufacturing industry facilities are located across Canada, 
+//  broken down by Census Division.
 // ════════════════════════════════════════════════════════════════════════════
 
 (async function() {
@@ -11,20 +11,33 @@
   // ─── SECTION 1: DATA FETCHING ─────────────────────────────────────────────
 
   // Downloads the GeoJSON file that contains the shape of every Census Division
+  // Fetches a resource from primaryUrl, falling back to fallbackUrl on any
+  // network error or non-OK HTTP status (e.g. 429 rate-limit from GitHub).
+  async function fetchWithFallback(primaryUrl, fallbackUrl) {
+    try {
+      const response = await fetch(primaryUrl);
+      if (response.ok) return response;
+      console.warn(`Primary fetch failed (${response.status}), trying fallback: ${fallbackUrl}`);
+    } catch (err) {
+      console.warn(`Primary fetch threw, trying fallback: ${fallbackUrl}`, err);
+    }
+    const fallback = await fetch(fallbackUrl);
+    if (!fallback.ok) throw new Error(`Both primary and fallback fetches failed: ${fallback.statusText}`);
+    return fallback;
+  }
+
   async function fetchGeoData() {
-    const url = "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/data/Canada_CD.geojson";
-    const response = await fetch(url);
-    // If the download fails, throw a descriptive error rather than silently continuing
-    if (!response.ok) throw new Error(`Failed to fetch GeoJSON: ${response.statusText}`);
+    const primary  = "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/data/Canada_CD.geojson";
+    const fallback = "https://cdn.jsdelivr.net/gh/riley-kemp/defence-map@refs/heads/main/data/Canada_CD.geojson";
+    const response = await fetchWithFallback(primary, fallback);
     return response.json();
   }
 
   // Downloads the CSV file listing individual defence facilities.
   async function fetchCsvData() {
-    const url = "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/data/defence_facilities.csv";
-    const response = await fetch(url);
-    if (!response.ok) throw new Error(`Failed to fetch CSV: ${response.statusText}`);
-
+    const primary  = "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/data/defence_facilities.csv";
+    const fallback = "https://cdn.jsdelivr.net/gh/riley-kemp/defence-map@refs/heads/main/data/defence_facilities.csv";
+    const response = await fetchWithFallback(primary, fallback);
     // d3.csvParse converts the raw CSV text into an array of plain JS objects —
     // one object per row, with column headers as keys.
     const rawText = await response.text();
@@ -2461,9 +2474,13 @@
       .style("display", "flex")
       .style("align-items", "center");
 
-    const logoUrl = state.isDark
-      ? "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/assets/Trillium_full_color_ondark.svg"
-      : "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/assets/Trillium_full_color_onlight.svg";
+    const LOGO_URLS = {
+      dark:  { primary: "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/assets/Trillium_full_color_ondark.svg",
+               fallback: "https://cdn.jsdelivr.net/gh/riley-kemp/defence-map@refs/heads/main/assets/Trillium_full_color_ondark.svg" },
+      light: { primary: "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/assets/Trillium_full_color_onlight.svg",
+               fallback: "https://cdn.jsdelivr.net/gh/riley-kemp/defence-map@refs/heads/main/assets/Trillium_full_color_onlight.svg" },
+    };
+    const logoUrl = state.isDark ? LOGO_URLS.dark.primary : LOGO_URLS.light.primary;
 
     const logoLink = logoContainer.append("a")
       .attr("href", "https://trilliummfg.ca/")
@@ -2478,15 +2495,21 @@
       .style("width", "auto")
       .style("object-fit", "contain")
       .on("error", function() {
-        // Hide the broken image and show a text fallback so the sidebar header
-        // isn't silently blank if the remote SVG fails to load.
-        d3.select(this).style("display", "none");
-        logoLink.append("span")
-          .style("font-family", "'Inter', sans-serif")
-          .style("font-size", _setupMobile ? "16px" : "20px")
-          .style("font-weight", "600")
-          .style("color", getC().accent)
-          .text("Trillium");
+        // Primary (GitHub) load failed — try the jsDelivr fallback URL first.
+        // If that also errors, hide the image and show a text fallback instead.
+        const imgEl = this;
+        const fallbackSrc = state.isDark ? LOGO_URLS.dark.fallback : LOGO_URLS.light.fallback;
+        if (imgEl.src !== fallbackSrc) {
+          imgEl.src = fallbackSrc;
+        } else {
+          d3.select(imgEl).style("display", "none");
+          logoLink.append("span")
+            .style("font-family", "'Inter', sans-serif")
+            .style("font-size", _setupMobile ? "16px" : "20px")
+            .style("font-weight", "600")
+            .style("color", getC().accent)
+            .text("Trillium");
+        }
       });
 
     // ── Page title ──
@@ -2985,7 +3008,9 @@
   function refreshControlsState() {
     const c = getC();
 
-    // Swap the logo image for the correct dark/light version
+    // Swap the logo image for the correct dark/light version.
+    // Use the primary (GitHub) URL; the img's own error handler will
+    // automatically retry with the jsDelivr fallback if GitHub is unavailable.
     const logoImg = document.getElementById("logo-img");
     if (logoImg) {
       logoImg.src = state.isDark
