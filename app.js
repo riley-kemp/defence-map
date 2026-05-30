@@ -1,6 +1,6 @@
 
 // ════════════════════════════════════════════════════════════════════════════
-//  CANADA DEFENCE MAP — app.js
+//  CANADA DEFENCE MANUFACTURING INDUSTRY MAP — app.js
 //  This file builds and runs an interactive map showing where defence
 //  manufacturing industry facilities are located across Canada, 
 //  broken down by Census Division.
@@ -28,7 +28,7 @@
 
   async function fetchGeoData() {
     const primary  = "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/data/Canada_CD.geojson";
-    const fallback = "https://cdn.jsdelivr.net/gh/riley-kemp/defence-map@refs/heads/main/data/Canada_CD.geojson";
+    const fallback = "https://cdn.jsdelivr.net/gh/riley-kemp/defence-map@main/data/Canada_CD.geojson";
     const response = await fetchWithFallback(primary, fallback);
     return response.json();
   }
@@ -36,7 +36,7 @@
   // Downloads the CSV file listing individual defence facilities.
   async function fetchCsvData() {
     const primary  = "https://raw.githubusercontent.com/riley-kemp/defence-map/refs/heads/main/data/defence_facilities.csv";
-    const fallback = "https://cdn.jsdelivr.net/gh/riley-kemp/defence-map@refs/heads/main/data/defence_facilities.csv";
+    const fallback = "https://cdn.jsdelivr.net/gh/riley-kemp/defence-map@main/data/defence_facilities.csv";
     const response = await fetchWithFallback(primary, fallback);
     // d3.csvParse converts the raw CSV text into an array of plain JS objects —
     // one object per row, with column headers as keys.
