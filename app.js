@@ -577,6 +577,10 @@
       --shadow-sm:    0 10px 30px rgba(0,0,0,0.1);
       --legend-bg:    rgba(255,255,255,0.9);
     }
+    @media (max-width: 768px) {
+      :root          { --legend-bg: #ffffff; }
+      body.dark      { --legend-bg: #161b24; }
+    }
     body.dark {
       background-color: #0e1117;
       --bg:           #0e1117;
@@ -1210,7 +1214,8 @@
     .style("left",   _setupMobile ? "10px" : null)
     .style("right",  _setupMobile ? null   : "30px")
     .style("height", _legendH)
-    .style("backdrop-filter", "blur(15px)")
+    .style("backdrop-filter", isMobile() ? "none" : "blur(15px)")
+    .style("background", isMobile() ? (state.isDark ? "#161b24" : "#ffffff") : null)
     .style("padding", _setupMobile ? "10px 12px" : "20px")
     .style("border-radius", "6px")
     .style("min-width", _setupMobile ? null : "260px")
@@ -1331,6 +1336,12 @@
 	  clearTimeout(_zoomEndTimer);
 	  svg.classed("is-panning",  state.isPanning  && !state.isZooming);
 	  svg.classed("is-zooming",  state.isZooming  || _isProgrammaticZoom);
+	  // Promote the map group to its own compositor layer for the duration of
+	  // the gesture — prevents Firefox from rasterising the whole <g> as a
+	  // single low-res bitmap, which is especially visible when zoomed out far.
+	  // Only do this for manual gestures — not programmatic startup/feature zooms.
+	  const g = mapGroup.node();
+	  if (g && event.sourceEvent) g.style.willChange = "transform";
 	})
 	.on("zoom", (event) => {
 	  const { x, y, k } = event.transform;
@@ -1372,14 +1383,18 @@
 	  state.isZooming = false;
 	  state.isPanning = false;
 	  if (_isProgrammaticZoom) _isProgrammaticZoom = false;
-	  clearTimeout(_zoomEndTimer);
+	  // Do NOT cancel _zoomEndTimer here — the debounced sharpness nudge from the
+	  // "zoom" handler should still fire ~50ms after the gesture ends, which is
+	  // needed on mobile Firefox where the "end" nudge alone isn't sufficient.
 	  // Commit final position as SVG presentation attribute (clears inline style).
 	  _applyZoomTransform(x, y, k, true);
 	  _applyStrokeWidths();
 	  svg.classed("is-zooming", false);
 	  svg.classed("is-panning", false);
-	  // Nudge to force Firefox to re-composite from vectors at final position.
+	  // Release the compositor layer hint now the gesture is over.
 	  const g = mapGroup.node();
+	  if (g) g.style.willChange = "auto";
+	  // Nudge to force Firefox to re-composite from vectors at final position.
 	  if (g) requestAnimationFrame(() => {
 	    g.style.transform = `matrix(${k},0,0,${k},${x + 0.001},${y})`;
 	    requestAnimationFrame(() => {
@@ -3390,6 +3405,7 @@
     // Re-apply grid layout and legend height in case orientation changed
     controlPanel.style("grid-template-columns", isLandscapeMobile() ? "1fr 1fr" : "1fr");
     legendOverlay.style("height", isMobile() ? "144px" : null);
+    if (isMobile()) legendOverlay.style("background", state.isDark ? "#161b24" : "#ffffff");
 
     buildControlsDOM();        // Build the sidebar controls if not already built
     refreshControlsState();    // Apply current filter state to chip appearances
