@@ -214,6 +214,7 @@
     legendMax: 1,                      // Highest facility count currently shown in the legend
     legendColourScale: null,           // The D3 colour-scale function currently in use
     mapView: "cd",                     // "cd" = Census Division view, "province" = Province/Territory view
+    isAtDefaultView: true,             // True while at the full-Canada home view; cleared by user pan/zoom, set by zoomToFull
   };
 
   // ─── SECTION 6: HELPER UTILITIES ─────────────────────────────────────────
@@ -408,6 +409,15 @@
   const isMobile = () => _setupMobile;
   const isLandscapeMobile = () => _setupMobile && window.innerWidth > window.innerHeight;
 
+
+  // Firefox rasterises <g> elements that have a CSS inline transform into a
+  // compositor texture. That texture goes stale after a zoom gesture and takes
+  // 3-5 seconds to invalidate, producing persistent blur. Using the SVG
+  // presentation attribute instead forces per-frame vector re-rendering with
+  // no texture caching. We therefore always use the attribute path — the CSS
+  // matrix path was a Chrome optimisation but the attribute write cost on
+  // mobile (already throttled to rAF cadence) is negligible in practice.
+
   // Returns true on desktop when the viewport is too short to comfortably
   // display the donut chart and the Facility Operations Type accordion stacked.
   // 680 px is enough to fit both; below that we switch to a side-by-side layout.
@@ -490,40 +500,12 @@
     /* ── Map region opacity transitions ── */
     /* Opacity is driven entirely by renderMap()'s inline style — CSS transition
        handles the animation so D3 transitions don't compete with renderMap writes. */
-    path.cd-region, path.pr-region {
-      transition: opacity 0.25s ease;
-      -webkit-tap-highlight-color: transparent;
-      vector-effect: non-scaling-stroke;
-      shape-rendering: geometricPrecision;
-    }
-
-    /* ── Suppress opacity transitions during zoom/pan gestures ── */
-    /* While zooming, Chrome must track every path element as "potentially
-       animating" due to the transition declaration, even though nothing is
-       actually changing. Removing the transition for the duration of the gesture
-       eliminates that compositor overhead. The class is toggled by _zoomStart /
-       _zoomEnd so the click-dim animation still works at all other times. */
-    svg.is-zooming path.cd-region,
-    svg.is-zooming path.pr-region,
-    svg.is-panning path.cd-region,
-    svg.is-panning path.pr-region {
-      transition: none !important;
-    }
-
-
-
     /* ── Suppress Chrome/Safari blue flash on click ── */
-    path.cd-region, path.pr-region,
     #control-panel button,
     #map-container button {
       -webkit-tap-highlight-color: transparent;
     }
 
-    /* ── Accessibility: visible focus indicators ── */
-    path.cd-region:focus, path.pr-region:focus,
-    path.cd-region:focus-visible, path.pr-region:focus-visible {
-      outline: none;
-    }
     /* Suppress the browser's default square :focus outline on control-panel buttons.
        Keyboard users still get the green ring via :focus-visible below. */
     #control-panel button:focus {
@@ -801,6 +783,7 @@
     .style("font-weight", "600")
     .on("click", function() {
       flashBtn(d3.select(this));
+      state.isAtDefaultView = false;
       _isProgrammaticZoom = true;
       svg.transition().duration(350).call(zoom.scaleBy, 1.5);
     });
@@ -809,6 +792,7 @@
     .style("font-weight", "600")
     .on("click", function() {
       flashBtn(d3.select(this));
+      state.isAtDefaultView = false;
       _isProgrammaticZoom = true;
       svg.transition().duration(350).call(zoom.scaleBy, 0.67);
     });
@@ -834,7 +818,7 @@
     .style("box-sizing", "border-box")
     .style("overflow-y", "auto")
     .style("z-index", _setupMobile ? "110" : "10")
-    .style("position", _setupMobile ? "absolute" : "relative");
+    .style("position", "absolute");
 
   const CLOSE_RATIO      = 0.35;
   const FULLSCREEN_RATIO = 0.70; // drag above this fraction of viewport → snap to top
@@ -865,11 +849,18 @@
       .style("transform", "translateY(100%)")
       .style("transition", "transform 0.4s ease, background 0.3s ease, border 0.3s ease");
   } else {
-    // On desktop: fixed-width panel on the left edge.
+    // On desktop: absolute panel overlaying the map on the left edge.
+    // position:absolute keeps the sidebar out of the flex layout so the
+    // map canvas always fills the full container — open/close never
+    // resizes the canvas.
     sidebar
+      .style("position", "absolute")
+      .style("top", "0")
+      .style("left", "0")
       .style("width", `${SIDEBAR_WIDTH}px`)
       .style("height", "100%")
       .style("padding", "30px 24px")
+      .style("z-index", "10")
       .style("transition", "width 0.4s ease, padding 0.4s ease");
   }
 
@@ -1175,31 +1166,75 @@
   }
 
   // The map canvas area — takes up all remaining horizontal space beside the sidebar
+  // No CSS transition on mapContainer — a transition on the SVG's direct parent
+  // causes Firefox to rasterise the SVG into a compositor texture, which goes
+  // stale during zoom gestures and produces 3-5 seconds of blur. The sidebar's
+  // own width transition drives the layout reflow; mapContainer flex-grows to
+  // fill the remaining space without needing its own transition.
   const mapContainer = mainWrapper.append("div")
     .style("flex", "1")
-    .style("position", "relative")
-    .style("transition", "width 0.4s ease, flex 0.4s ease");
+    .style("position", "relative");
 
-  // The SVG element where D3 draws all the geographic regions.
-  // viewBox makes it resolution-independent; it scales to fill its container.
+  // ── Canvas map element ────────────────────────────────────────────────────
+  // The map is drawn on a <canvas> rather than SVG. Canvas scales correctly
+  // with devicePixelRatio so zooming stays sharp on all browsers including
+  // Firefox (which blurs SVG paths under a zoom transform for 3-5 seconds).
+  // D3 zoom is attached to a transparent overlay <svg> that sits on top of
+  // the canvas and receives pointer/touch events — the canvas itself does not
+  // handle events directly.
+  const canvas = mapContainer.append("canvas")
+    .style("position", "absolute")
+    .style("top", "0").style("left", "0")
+    .style("width", "100%").style("height", "100%")
+    .style("pointer-events", "none");
+
+  // Transparent SVG overlay — same size as canvas, receives all pointer events
+  // and hosts the D3 zoom behaviour. Nothing is drawn into it.
   const svg = mapContainer.append("svg")
-  .style("width", "100%")
-  .style("height", "100%")
-  .style("touch-action", "none")  // Required for D3 zoom to receive touch events in Firefox
-  .on("click", () => {});
+    .style("position", "absolute")
+    .style("top", "0").style("left", "0")
+    .style("width", "100%").style("height", "100%")
+    .attr("width", "100%").attr("height", "100%")
+    .style("touch-action", "none")
+    .on("click", () => {});
 
-  // A <g> group element that all map paths are drawn into.
-  // D3 zoom transforms are applied to this group rather than the whole SVG,
-  // so the buttons and legend (outside this group) stay fixed in place.
-  const mapGroup = svg.append("g");
+  // Use a getter so _dpr stays current if the user moves the window to a
+  // different monitor or changes browser zoom (devicePixelRatio can change).
+  const _dpr = () => window.devicePixelRatio || 1;
 
-  // Cached D3 selection of all Census Division <path> elements.
-  // Assigned inside renderMap() after the .join() call and reused everywhere
-  // else that previously called mapGroup.selectAll("path.cd-region") directly —
-  // avoiding redundant DOM queries on every interaction.
-  let cdPaths = mapGroup.selectAll("path.cd-region"); // empty selection before first render
-  // Parallel cached selection for Province/Territory paths.
-  let prPaths = mapGroup.selectAll("path.pr-region"); // empty selection before first render
+  // Resize the canvas to match the container in CSS pixels.
+  // We deliberately do NOT multiply by devicePixelRatio here. When the canvas
+  // width/height attributes equal the CSS pixel size the browser scales the
+  // canvas to the physical display using its own high-quality AA'd upscale,
+  // and the ctx transform stays at _zoomK only (range 0.6–40). If we set the
+  // backing store to physical pixels and scale the ctx by dpr, the effective
+  // rasterisation scale becomes _zoomK*dpr — on a DPR=3 phone at zoom=2 that
+  // is 6×, which causes mobile browsers to switch off sub-pixel path AA and
+  // produce the staircase edges visible in the screenshot.
+  function _resizeCanvas() {
+    const w = mapContainer.node().clientWidth;
+    const h = mapContainer.node().clientHeight;
+    canvas.attr("width", w).attr("height", h);
+  }
+
+  // Canvas 2D context — used by drawCanvas() to paint the map each frame.
+  // { alpha: true } keeps the default transparent background.
+  // { desynchronized: false } ensures paint is synchronised with the display
+  // refresh on mobile (some Android browsers desynchronise by default, which
+  // can cause partial-frame tears during pan/zoom).
+  const ctx = canvas.node().getContext("2d", { alpha: true, desynchronized: false });
+
+  // cdPaths / prPaths: keep as plain arrays of features (not D3 selections)
+  // so the rest of the code that iterates them still works.
+  let cdPaths = [];
+  let prPaths = [];
+  // mapGroup shim — parts of the code call mapGroup.selectAll / .attr;
+  // replace with a no-op object so those calls silently do nothing.
+  const mapGroup = { 
+    selectAll: () => ({ data: () => ({ join: () => {} }) }),
+    node: () => null,
+    attr: () => mapGroup,
+  };
 
   // The legend overlay box (bottom-right on desktop, top-left on mobile).
   // Shows the colour scale and swatch key for the choropleth.
@@ -1243,6 +1278,62 @@
     .fitExtent([[10, 20], [WIDTH - 10, HEIGHT - 110]], fixedData);
   const path = d3.geoPath().projection(projection);
 
+  // ── Path2D cache ─────────────────────────────────────────────────────────
+  // For canvas rendering we cache Path2D objects (one per feature) rather than
+  // SVG "d" strings. Path2D objects can be passed directly to ctx.fill() /
+  // ctx.stroke() and also used for hit testing via ctx.isPointInPath().
+  // The cache is invalidated whenever the projection changes (resize/zoomToFull).
+  let _pathCacheCD = null;
+  let _pathCachePR = null;
+  function invalidatePathCache() { 
+    _pathCacheCD = null; 
+    _pathCachePR = null; 
+    fixedData.features.forEach(f => f._bounds = null);
+    provinceData.features.forEach(f => f._bounds = null);
+  }
+
+  // Cached combined border path — rebuilt only when the feature set or selected
+  // feature changes, not on every zoom/pan frame. lineWidth is kept in
+  // projection space (1/(k*dpr)) so zoom simply scales it, no rebuild needed.
+  let _borderPathCache = null;     // { path: Path2D, selectedFeature, isProvince }
+  function _getBorderPath(features, isProvince) {
+    if (
+      _borderPathCache &&
+      _borderPathCache.isProvince === isProvince &&
+      _borderPathCache.selectedFeature === state.selectedFeature
+    ) return _borderPathCache.path;
+
+    const bp = new Path2D();
+    for (const feature of features) {
+      if (feature !== state.selectedFeature) {
+        bp.addPath(_cachedPath2D(feature, isProvince));
+      }
+    }
+    _borderPathCache = { path: bp, selectedFeature: state.selectedFeature, isProvince };
+    return bp;
+  }
+
+  function _cachedPath2D(feature, isProvince) {
+    // Cache the bounding box limits dynamically
+    if (!feature._bounds) feature._bounds = path.bounds(feature);
+
+    if (isProvince) {
+      if (!_pathCachePR) _pathCachePR = new Map();
+      let p2 = _pathCachePR.get(feature._pruid);
+      if (!p2) { p2 = new Path2D(path(feature)); _pathCachePR.set(feature._pruid, p2); }
+      return p2;
+    } else {
+      if (!_pathCacheCD) _pathCacheCD = new Map();
+      let p2 = _pathCacheCD.get(feature._cduid);
+      if (!p2) { p2 = new Path2D(path(feature)); _pathCacheCD.set(feature._cduid, p2); }
+      return p2;
+    }
+  }
+
+  // _cachedPath is kept as an alias so zoomToFull (which calls cdPaths.attr("d",...)
+  // on a shim) compiles without error — those calls are no-ops on the shim.
+  const _cachedPath = _cachedPath2D;
+
   // ─── SECTION 11: ZOOM AND PANNING CONFIGURATION ───────────────────────────
 
   let _mousemoveRafPending = false; // Flag to throttle tooltip repositioning on mousemove
@@ -1250,20 +1341,12 @@
   // True while a programmatic (D3 transition) zoom is in flight.
   let _isProgrammaticZoom = false;
 
-  // Stroke width constants. With vector-effect:non-scaling-stroke on all map
-  // paths, these are always screen pixels regardless of the zoom transform —
-  // borders never scale with the map, so there is nothing to recompute per frame.
+  // Stroke width constants (screen pixels). drawCanvas() divides by _zoomK
+  // to keep borders visually constant regardless of zoom level.
   const _strokeWidth         = () => 0.5;
   const _strokeWidthSelected = () => 2;
-
-  // Writes the correct stroke-width attribute to the active layer's paths.
-  // Called once on zoom "end" and on render — never mid-gesture.
-  // Because the value is constant, this is mainly ensuring newly-joined paths
-  // (e.g. after a filter change) have the attribute set correctly.
-  function _applyStrokeWidths() {
-    const activePaths = state.mapView === "province" ? prPaths : cdPaths;
-    activePaths.attr("stroke-width", d => d === state.selectedFeature ? _strokeWidthSelected() : _strokeWidth());
-  }
+  // No-op on canvas — stroke widths are applied directly in drawCanvas().
+  function _applyStrokeWidths() {}
 
 
 
@@ -1301,7 +1384,6 @@
   // so without throttling every event queues a synchronous DOM attribute write
   // and SVG repaint — flooding Chrome's paint queue and causing the crash/reset.
   // We collapse all events within a single frame into one write.
-  let _zoomEndTimer = null;
   let _manualZoomRafPending = false;
   
   // Helper: applies the zoom transform to the <g> element.
@@ -1310,15 +1392,76 @@
   // the correct resolution each frame and eliminating the blur-on-zoom issue.
   // On "end", clears the inline style and commits to the SVG presentation
   // attribute instead, which is the correct clean at-rest state.
-  function _applyZoomTransform(x, y, k, asAttr) {
-    const g = mapGroup.node();
-    if (!g) return;
-    if (asAttr) {
-      g.style.transform = "";
-      mapGroup.attr("transform", `translate(${x},${y}) scale(${k})`);
-    } else {
-      g.style.transform = `matrix(${k},0,0,${k},${x},${y})`;
+  // Current zoom transform — updated on every zoom event and used by drawCanvas.
+  let _zoomX = 0, _zoomY = 0, _zoomK = 1;
+
+  // Redraws the map canvas. All coordinates are in CSS pixels — the canvas
+  // width/height attributes match clientWidth/clientHeight so no DPR scaling
+  // is needed in the context transform. The browser scales canvas→screen using
+  // its own AA'd upscale, keeping the effective rasterisation scale at _zoomK.
+  function drawCanvas() {
+    const cssW = canvas.node().width;
+    const cssH = canvas.node().height;
+
+    const c = getC();
+    const isProvince = state.mapView === "province";
+    const features = isProvince ? prPaths : cdPaths;
+
+    ctx.setTransform(_zoomK, 0, 0, _zoomK, _zoomX, _zoomY);
+    ctx.clearRect(-_zoomX / _zoomK, -_zoomY / _zoomK, cssW / _zoomK, cssH / _zoomK);
+
+    // ── Pass 1: fills ────────────────────────────────────────────────────────
+    for (const feature of features) {
+      const p2 = _cachedPath2D(feature, isProvince);
+      const val = state.mapView === "province"
+        ? (_filteredValueCachePR?.get(feature._pruid) ?? 0)
+        : (_filteredValueCache?.get(feature._cduid) ?? 0);
+
+      const opacity = (state.selectedFeature && feature !== state.selectedFeature) ? 0.35 : 1;
+      ctx.globalAlpha = opacity;
+      ctx.fillStyle = val
+        ? (state.legendColourScale ? state.legendColourScale(val) : c.noData)
+        : (hasAnyData(feature) ? c.noData : c.noDataNone);
+      ctx.fill(p2);
     }
+
+	// ── Pass 2: border strokes ───────────────────────────────────────────────
+    const targetCSS  = isMobile() ? 1.2 : 1.0;
+    const borderColour = isMobile() ? "rgba(0,0,0,0.32)" : "rgba(0,0,0,0.24)";
+    
+    ctx.globalAlpha = state.selectedFeature ? 0.55 : 1;
+    ctx.strokeStyle = borderColour;
+    ctx.lineWidth   = targetCSS / _zoomK;
+    
+    // Stroke each path individually. This completely bypasses the 
+    // mega-path CPU bottleneck and runs instantly.
+    for (const feature of features) {
+      if (feature !== state.selectedFeature) {
+        ctx.stroke(_cachedPath2D(feature, isProvince));
+      }
+    }
+
+    // ── Pass 3: selected + hovered outlines ──────────────────────────────────
+    ctx.globalAlpha = 1;
+    if (state.selectedFeature) {
+      const sp2 = _cachedPath2D(state.selectedFeature, isProvince);
+      ctx.strokeStyle = c.accent2;
+      ctx.lineWidth   = 2 / _zoomK;
+      ctx.stroke(sp2);
+    }
+    if (state.hoveredFeature && state.hoveredFeature !== state.selectedFeature) {
+      const hp2 = _cachedPath2D(state.hoveredFeature, isProvince);
+      ctx.strokeStyle = c.text;
+      ctx.lineWidth   = targetCSS / _zoomK;
+      ctx.stroke(hp2);
+    }
+
+    ctx.globalAlpha = 1;
+  }
+
+  function _applyZoomTransform(x, y, k) {
+    _zoomX = x; _zoomY = y; _zoomK = k;
+    drawCanvas();
   }
 
   const zoom = d3.zoom()
@@ -1331,22 +1474,16 @@
 		} else {
 		  state.isZooming = true;
 		}
+		// User is interacting manually — no longer at the default home view
+		state.isAtDefaultView = false;
 	  }
 	  tooltip.style("visibility", "hidden");
-	  clearTimeout(_zoomEndTimer);
-	  svg.classed("is-panning",  state.isPanning  && !state.isZooming);
-	  svg.classed("is-zooming",  state.isZooming  || _isProgrammaticZoom);
-	  // Promote the map group to its own compositor layer for the duration of
-	  // the gesture — prevents Firefox from rasterising the whole <g> as a
-	  // single low-res bitmap, which is especially visible when zoomed out far.
-	  // Only do this for manual gestures — not programmatic startup/feature zooms.
-	  const g = mapGroup.node();
-	  if (g && event.sourceEvent) g.style.willChange = "transform";
 	})
 	.on("zoom", (event) => {
 	  const { x, y, k } = event.transform;
 	  if (_isProgrammaticZoom) {
-		_applyZoomTransform(x, y, k, false);
+		_applyZoomTransform(x, y, k);
+		_applyStrokeWidths();
 	  } else {
 		_pendingManualX = x;
 		_pendingManualY = y;
@@ -1354,54 +1491,25 @@
 		if (!_manualZoomRafPending) {
 		  _manualZoomRafPending = true;
 		  requestAnimationFrame(() => {
-			_applyZoomTransform(_pendingManualX, _pendingManualY, _pendingManualK, false);
+			_applyZoomTransform(_pendingManualX, _pendingManualY, _pendingManualK);
+			_applyStrokeWidths();
 			_manualZoomRafPending = false;
 		  });
 		}
 	  }
-	  // Debounce a Firefox sharpness nudge: 50ms after zoom events go idle, read
-	  // the live transform from D3 and do a clean commit. This bypasses D3's own
-	  // ~150ms "end" debounce so blur clears nearly instantly after scrolling stops.
-	  clearTimeout(_zoomEndTimer);
-	  _zoomEndTimer = setTimeout(() => {
-	    const { x: tx, y: ty, k: tk } = d3.zoomTransform(svg.node());
-	    const g = mapGroup.node();
-	    if (!g) return;
-	    g.style.transform = "";
-	    mapGroup.attr("transform", `translate(${tx},${ty}) scale(${tk})`);
-	    requestAnimationFrame(() => {
-	      g.style.transform = `matrix(${tk},0,0,${tk},${tx + 0.001},${ty})`;
-	      requestAnimationFrame(() => {
-	        g.style.transform = "";
-	        mapGroup.attr("transform", `translate(${tx},${ty}) scale(${tk})`);
-	      });
-	    });
-	  }, 50);
+	  // No debounced timer needed — _applyZoomTransform already writes the SVG
+	  // attribute on every rAF, and the "end" handler clears is-zooming/is-panning
+	  // once the gesture finishes. A timer here that toggles those classes mid-
+	  // gesture causes a full style recalculation across all 290 paths every 50ms
+	  // (the transition:none rule fires on every add/remove), which is the source
+	  // of the layout thrash visible in the performance profile.
 	})
 	.on("end", (event) => {
 	  const { x, y, k } = event.transform;
+	  if (_isProgrammaticZoom) _isProgrammaticZoom = false;
 	  state.isZooming = false;
 	  state.isPanning = false;
-	  if (_isProgrammaticZoom) _isProgrammaticZoom = false;
-	  // Do NOT cancel _zoomEndTimer here — the debounced sharpness nudge from the
-	  // "zoom" handler should still fire ~50ms after the gesture ends, which is
-	  // needed on mobile Firefox where the "end" nudge alone isn't sufficient.
-	  // Commit final position as SVG presentation attribute (clears inline style).
-	  _applyZoomTransform(x, y, k, true);
-	  _applyStrokeWidths();
-	  svg.classed("is-zooming", false);
-	  svg.classed("is-panning", false);
-	  // Release the compositor layer hint now the gesture is over.
-	  const g = mapGroup.node();
-	  if (g) g.style.willChange = "auto";
-	  // Nudge to force Firefox to re-composite from vectors at final position.
-	  if (g) requestAnimationFrame(() => {
-	    g.style.transform = `matrix(${k},0,0,${k},${x + 0.001},${y})`;
-	    requestAnimationFrame(() => {
-	      g.style.transform = "";
-	      mapGroup.attr("transform", `translate(${x},${y}) scale(${k})`);
-	    });
-	  });
+	  _applyZoomTransform(x, y, k);
 	})
 
   // Attach the zoom behavior to the SVG canvas
@@ -1463,14 +1571,12 @@
       }
     }
 
-    // When the sidebar was closed and is now opening, the SVG clientWidth still
-    // reflects the pre-open (wider) size at the time zoomToFeature runs.
-    // Shift the horizontal centre leftward by half the sidebar width so the
-    // feature lands centred in the post-open map area once the animation settles.
+    // The sidebar overlays the map — shift the horizontal centre rightward
+    // by half the sidebar width so the feature lands in the visible area.
     let sidebarOffsetX = 0;
-    if (sidebarWasClosed) {
+    if (state.sidebarOpen) {
       const effectiveWidth = isSidebarShort() ? SIDEBAR_WIDTH * 2 : SIDEBAR_WIDTH;
-      sidebarOffsetX = effectiveWidth / 2;
+      sidebarOffsetX = -(effectiveWidth / 2);
     }
 
     const scale = Math.max(1, Math.min(150, 0.45 / Math.max(dx / w, dy / h)));
@@ -1488,14 +1594,11 @@
     const w = svgNode ? svgNode.clientWidth  : WIDTH;
     const h = svgNode ? svgNode.clientHeight : HEIGHT;
     // Refit projection into actual pixel space with a small inset on each side.
-    // Always use fixedData (CDs) for the fit extent — it covers the same geographic
-    // area as provinceData but has pre-validated winding, so the fit is stable
-    // regardless of which view is currently active.
+    _resizeCanvas();
     projection.fitExtent([[10, 20], [w - 10, h - 20]], fixedData);
-    // Redraw all paths using the updated projection (both layers need valid
-    // geometry so switching views doesn't require a full re-render).
-    cdPaths.attr("d", path);
-    prPaths.attr("d", path);
+    // Projection changed — Path2D cache is stale; invalidate so next
+    // drawCanvas() recomputes paths for the new pixel space.
+    invalidatePathCache();
 
     // ── Desktop legend-overlap compensation ─────────────────────────────────
     // On desktop, the legend sits bottom-right. If its bounding box would cover
@@ -1521,16 +1624,25 @@
     }
     }
 
+    // When the sidebar is open on desktop it overlays the left portion of the
+    // map. Shift the centring translate rightward by half the sidebar width so
+    // Canada is centred in the visible (non-sidebar) area, not the full canvas.
+    let sidebarShift = 0;
+    if (!isMobile() && state.sidebarOpen) {
+      sidebarShift = (isSidebarShort() ? SIDEBAR_WIDTH * 2 : SIDEBAR_WIDTH) / 2;
+    }
+
     // Clear any D3 zoom/pan transform — projection now handles the positioning.
-    // Apply the legend-compensation scale centred in the SVG.
-    const transform = desktopScale === 1
-    ? d3.zoomIdentity
-    : d3.zoomIdentity
-      .translate(w / 2 * (1 - desktopScale), h / 2 * (1 - desktopScale))
-      .scale(desktopScale);
+    // Apply the legend-compensation scale centred in the visible area.
+	const transform = desktopScale === 1
+	  ? d3.zoomIdentity.translate(sidebarShift + 0.01, 0.01).scale(1.00001) // Forces GPU fast-path
+	  : d3.zoomIdentity
+		.translate(w / 2 * (1 - desktopScale) + sidebarShift, h / 2 * (1 - desktopScale))
+		.scale(desktopScale);
 
     if (animate === false) {
     svg.call(zoom.transform, transform);
+    state.isAtDefaultView = true;
     } else {
     // zoomToFull refits the projection and redraws all paths, so the <g> is
     // always starting from a known clean state.  Skip the CSS-transform path
@@ -1539,6 +1651,8 @@
     // designed to work with, and avoids the double-offset that occurs when the
     // CSS transform on the SVG element compounds with the centring translate.
     svg.transition().duration(750).call(zoom.transform, transform);
+    // Mark as default view once the transition settles
+    state.isAtDefaultView = true;
     }
   }
 
@@ -1570,16 +1684,12 @@
       }
       return;
     }
-    // Desktop behaviour: animate the sidebar width and toggle the arrow icon.
-    // When the viewport is short, double the sidebar width so the donut chart
-    // and Facility Operations Type accordion can sit side-by-side.
+    // Desktop: sidebar overlays the map. Only pan when the open/closed state
+    // is actually changing — skip when called just to sync visual appearance
+    // (e.g. from updateUI on theme toggle) so the map doesn't drift.
     const effectiveWidth = isSidebarShort() ? SIDEBAR_WIDTH * 2 : SIDEBAR_WIDTH;
-
-    // Snapshot the zoom transform and SVG width BEFORE the sidebar CSS transition
-    // starts so we have a stable reference point to compute corrections against.
-    const svgNodePre = svg.node();
-    const wBefore    = svgNodePre ? svgNodePre.clientWidth : WIDTH;
-    const tBefore    = d3.zoomTransform(svgNodePre);
+    const _desktopSidebarWasOpen = sidebar.style("width") !== "30px";
+    const _stateChanged = state.sidebarOpen !== _desktopSidebarWasOpen;
 
     if (state.sidebarOpen) {
       sidebar.style("width", `${effectiveWidth}px`).style("padding", "30px 24px");
@@ -1591,47 +1701,15 @@
       collapseBtn.text("▶").style("left", "14px");
     }
 
-    // Drive the map translate in lock-step with the CSS sidebar transition using
-    // a requestAnimationFrame loop.  Each frame we read the sidebar's current
-    // rendered width, derive how much the SVG canvas has grown/shrunk relative to
-    // its pre-transition size, and immediately apply the matching translateX
-    // correction — no D3 transition needed because the loop itself is the animation.
-    //
-    // The geographic centre stays fixed because:
-    //   newTx = tBefore.x + (currentSvgWidth - wBefore) / 2
-    //
-    // The loop stops itself once the sidebar width has settled (two consecutive
-    // frames with < 0.5 px change) so it doesn't run forever.
-    const SIDEBAR_TRANSITION_MS = 400;
-    const rafDeadline = performance.now() + SIDEBAR_TRANSITION_MS + 50; // safety cap
-    let prevSidebarW  = sidebar.node() ? sidebar.node().getBoundingClientRect().width : 0;
-    let settledFrames = 0;
-
-    (function trackLoop(now) {
-      const svgNode = svg.node();
-      if (!svgNode) return;
-
-      // If a zoomToFeature transition is running, stop the centre-lock loop —
-      // continuing would overwrite the feature-zoom transform every frame and
-      // prevent the map from ever reaching the selected region.
-      if (_isProgrammaticZoom) return;
-
-      const sidebarNode = sidebar.node();
-      const curSidebarW = sidebarNode ? sidebarNode.getBoundingClientRect().width : prevSidebarW;
-      const curSvgW     = svgNode.clientWidth;
-      const delta       = curSvgW - wBefore;
-
-      // Apply correction immediately — no transition, the rAF loop IS the animation
-      zoom.transform(svg, d3.zoomIdentity.translate(tBefore.x + delta / 2, tBefore.y).scale(tBefore.k));
-
-      // Stop once the sidebar stops moving (settled) or the deadline is reached
-      const moved = Math.abs(curSidebarW - prevSidebarW);
-      prevSidebarW = curSidebarW;
-      if (moved < 0.5) { settledFrames++; } else { settledFrames = 0; }
-      if (settledFrames < 3 && now < rafDeadline) {
-        requestAnimationFrame(trackLoop);
-      }
-    })(performance.now());
+    // Only pan the map when the sidebar is genuinely opening or closing.
+    if (_stateChanged) {
+      const tNow = d3.zoomTransform(svg.node());
+      const panDelta = state.sidebarOpen ? effectiveWidth / 2 : -(effectiveWidth / 2);
+      svg.transition().duration(400)
+        .call(zoom.transform, d3.zoomIdentity
+          .translate(tNow.x + panDelta, tNow.y)
+          .scale(tNow.k));
+    }
   }
 
   // ─── SECTION 12: LEGEND RENDERING ────────────────────────────────────────
@@ -1879,117 +1957,116 @@
   // Extracted so the same logic can be reused for both CD and province paths
   // without duplication.  `nameKey` is the property name used for the tooltip
   // title ("CDNAME" for CDs, "PRNAME" for provinces).
-  function _attachPathHandlers(p, nameKey, _mobile) {
+  // ── Canvas hit detection ────────────────────────────────────────────────
+  // Since paths are drawn on a canvas there are no DOM elements to attach
+  // events to. Instead we listen on the SVG overlay and use isPointInPath
+  // to find the feature under the pointer.
+
+  function _featureAtPoint(cssX, cssY) {
+    const isProvince = state.mapView === "province";
+    const features = isProvince ? prPaths : cdPaths;
+    const px = (cssX - _zoomX) / _zoomK;
+    const py = (cssY - _zoomY) / _zoomK;
+    
+    ctx.save();
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    let found = null;
+    
+    for (let i = features.length - 1; i >= 0; i--) {
+      const feat = features[i];
+      const p2 = _cachedPath2D(feat, isProvince);
+      
+      // 1. Fast AABB Bounding Box Check
+      const b = feat._bounds;
+      if (b && (px < b[0][0] || px > b[1][0] || py < b[0][1] || py > b[1][1])) {
+        continue; // Cursor is outside the rectangle, skip heavy math
+      }
+      
+      // 2. Exact Polygon Check (Now only runs ~1 to 3 times per frame)
+      if (ctx.isPointInPath(p2, px, py)) { found = feat; break; }
+    }
+    
+    ctx.restore();
+    return found;
+  }
+
+  // Attach pointer events to the SVG overlay
+  function _attachCanvasHandlers() {
+    const _mobile = isMobile();
+
     if (!_mobile) {
-      p.on("mouseover", function(event, d) {
-          if (state.isZooming || state.isPanning) return;
+      svg.on("mousemove.map", function(event) {
+        if (state.isZooming || state.isPanning || _manualZoomRafPending) {
+          tooltip.style("visibility", "hidden");
+          return;
+        }
+        if (_mousemoveRafPending) return;
+        _mousemoveRafPending = true;
+        const [cx, cy] = d3.pointer(event, svg.node());
+        const px = event.pageX, py = event.pageY;
+        requestAnimationFrame(() => {
+          const feat = _featureAtPoint(cx, cy);
           const c = getC();
-          state.hoveredFeature = d;
-          if (state._hoveredEl && state._hoveredEl !== this) {
-            const prev = d3.select(state._hoveredEl);
-            if (prev.attr("stroke") !== c.accent2) prev.attr("stroke", c.bg).attr("stroke-width", _strokeWidth());
+          if (feat !== state.hoveredFeature) {
+            state.hoveredFeature = feat;
+            drawCanvas();
+            if (feat) {
+              const hoverVal = getFilteredValue(feat);
+              updateLegendMarker(hoverVal > 0 ? hoverVal : null, false);
+              const nameKey = state.mapView === "province" ? "PRNAME" : "CDNAME";
+              tooltip.style("visibility", "visible").html(`
+                <div style="color:${c.accent}; font-weight:600; font-size:14px; margin-bottom:4px;">${feat.properties[nameKey]}</div>
+                <div style="font-size:11px; color:${c.muted}; font-weight:400;">${getTooltipLabel(getFilteredValue(feat))}</div>
+              `);
+              const tipNode = tooltip.node();
+              if (tipNode) { _tipSize.w = tipNode.offsetWidth; _tipSize.h = tipNode.offsetHeight; }
+              svg.style("cursor", hasAnyData(feat) ? "pointer" : "default");
+            } else {
+              clearLegendMarker();
+              tooltip.style("visibility", "hidden");
+              svg.style("cursor", "default");
+            }
           }
-          state._hoveredEl = this;
-          const el = this;
-          const isSelected = d === state.selectedFeature;
-          if (!isSelected) {
-            if (el.nextSibling) d3.select(el).attr("stroke", c.text).attr("stroke-width", _strokeWidth()).raise();
-            else d3.select(el).attr("stroke", c.text).attr("stroke-width", _strokeWidth());
-          }
-          const hoverVal = getFilteredValue(d);
-          updateLegendMarker(hoverVal > 0 ? hoverVal : null, false);
-          tooltip.style("visibility", "visible").html(`
-            <div style="color:${c.accent}; font-weight:600; font-size:14px; margin-bottom:4px;">${d.properties[nameKey]}</div>
-            <div style="font-size:11px; color:${c.muted}; font-weight:400;">${getTooltipLabel(getFilteredValue(d))}</div>
-          `);
-          const tipNode = tooltip.node();
-          if (tipNode) { _tipSize.w = tipNode.offsetWidth; _tipSize.h = tipNode.offsetHeight; }
-        })
-        .on("mousemove", function(event) {
-          if (state.isZooming || state.isPanning) { tooltip.style("visibility", "hidden"); return; }
-          if (_mousemoveRafPending) return;
-          _mousemoveRafPending = true;
-          const px = event.pageX, py = event.pageY;
-          requestAnimationFrame(() => {
+          // Always update tooltip position
+          if (feat) {
             const left = Math.min(px + 15, window.innerWidth  + window.scrollX - _tipSize.w - 8);
             const top  = Math.min(py + 15, window.innerHeight + window.scrollY - _tipSize.h - 8);
             tooltip.style("top", `${top}px`).style("left", `${left}px`);
-            _mousemoveRafPending = false;
-          });
-        })
-        .on("mouseleave", function() {
-          const c = getC();
-          state.hoveredFeature = null;
-          state._hoveredEl = null;
-          const sel = d3.select(this);
-          if (sel.attr("stroke") !== c.accent2) sel.attr("stroke", c.bg).attr("stroke-width", _strokeWidth());
-          clearLegendMarker();
-          tooltip.style("visibility", "hidden");
-        })
-        .on("focus", function(event, d) {
-          const c = getC();
-          const el = this;
-          if (el.nextSibling) d3.select(el).attr("stroke", c.text).attr("stroke-width", _strokeWidth()).raise();
-          else d3.select(el).attr("stroke", c.text).attr("stroke-width", _strokeWidth());
-          const hoverVal = getFilteredValue(d);
-          updateLegendMarker(hoverVal > 0 ? hoverVal : null, false);
-          const rect = this.getBoundingClientRect();
-          const tipNode = tooltip.node();
-          const tipW = tipNode ? tipNode.offsetWidth  : 200;
-          const tipH = tipNode ? tipNode.offsetHeight : 50;
-          const rawLeft = rect.right + window.scrollX + 12;
-          const rawTop  = rect.top   + window.scrollY + rect.height / 2 - 10;
-          const left = Math.min(rawLeft, window.innerWidth  + window.scrollX - tipW  - 8);
-          const top  = Math.min(rawTop,  window.innerHeight + window.scrollY - tipH  - 8);
-          tooltip
-            .style("visibility", "visible")
-            .html(`
-              <div style="color:${c.accent}; font-weight:600; font-size:14px; margin-bottom:4px;">${d.properties[nameKey]}</div>
-              <div style="font-size:11px; color:${c.muted}; font-weight:400;">${getTooltipLabel(hoverVal)}</div>
-            `)
-            .style("top",  `${top}px`)
-            .style("left", `${left}px`);
-        })
-        .on("blur", function() {
-          const c = getC();
-          const sel = d3.select(this);
-          if (sel.attr("stroke") !== c.accent2) sel.attr("stroke", c.bg).attr("stroke-width", _strokeWidth());
-          clearLegendMarker();
-          tooltip.style("visibility", "hidden");
+          }
+          _mousemoveRafPending = false;
         });
+      })
+      .on("mouseleave.map", function() {
+        if (state.hoveredFeature !== null) {
+          state.hoveredFeature = null;
+          drawCanvas();
+        }
+        clearLegendMarker();
+        tooltip.style("visibility", "hidden");
+        svg.style("cursor", "default");
+      });
     }
 
-    // ── Click / tap interaction (all devices) ──
-    p.on("click", function(event, d) {
-      event.stopPropagation();
+    svg.on("click.map", function(event) {
+      const [cx, cy] = d3.pointer(event, svg.node());
+      const feat = _featureAtPoint(cx, cy);
+      if (!feat) { restoreMapAppearance(); return; }
+
       const c = getC();
+      if (!hasAnyData(feat)) { restoreMapAppearance(); return; }
+      if (state.selectedFeature === feat) { mobileCloseRegion(); return; }
 
-      if (!hasAnyData(d)) { restoreMapAppearance(); return; }
-      if (state.selectedFeature === d) { mobileCloseRegion(); return; }
-      if (state.selectedFeature !== d) _detailSkeletonBuilt = false;
-
-      state.selectedFeature = d;
-      const selVal = getFilteredValue(d);
+      if (state.selectedFeature !== feat) _detailSkeletonBuilt = false;
+      state.selectedFeature = feat;
+      const selVal = getFilteredValue(feat);
       updateLegendMarker(selVal > 0 ? selVal : null, true);
+      drawCanvas();
 
       const _sidebarWasClosed = !state.sidebarOpen;
       if (_sidebarWasClosed) { state.sidebarOpen = true; updateSidebarToggle(); }
 
-      // Dim inactive regions in whichever layer is active
-      const activePaths = state.mapView === "province" ? prPaths : cdPaths;
-      const clicked = this;
-      activePaths.interrupt()
-        .style("opacity", function() { return this === clicked ? 1 : 0.35; })
-        .attr("stroke", c.bg)
-        .attr("stroke-width", _strokeWidth());
-      d3.select(this)
-        .style("opacity", 1)
-        .attr("stroke", c.accent2)
-        .attr("stroke-width", _strokeWidthSelected())
-        .raise();
-
       updateSidebarDetail();
-      zoomToFeature(d, _sidebarWasClosed);
+      zoomToFeature(feat, _sidebarWasClosed);
 
       if (isMobile()) {
         setTimeout(() => {
@@ -2006,78 +2083,77 @@
         }, 50);
       }
     });
+
+    // Touch tap on mobile. D3 zoom calls preventDefault() on touch events so
+    // the browser never fires a synthetic click — we must handle taps here.
+    if (_mobile) {
+      let _tapStartX, _tapStartY, _tapStartTime;
+      svg.on("touchstart.map", function(event) {
+        if (event.touches.length !== 1) return; // ignore multi-touch (pinch)
+        const t = event.touches[0];
+        _tapStartX = t.clientX;
+        _tapStartY = t.clientY;
+        _tapStartTime = Date.now();
+      }, { passive: true })
+      .on("touchend.map", function(event) {
+        if (event.changedTouches.length !== 1) return;
+        const t = event.changedTouches[0];
+        const dx = Math.abs(t.clientX - (_tapStartX ?? t.clientX));
+        const dy = Math.abs(t.clientY - (_tapStartY ?? t.clientY));
+        const dt = Date.now() - (_tapStartTime ?? 0);
+        // Only treat as tap if finger barely moved and lifted quickly
+        if (dx > 8 || dy > 8 || dt > 500) return;
+
+        // Get the pointer position relative to the SVG overlay
+        const svgRect = svg.node().getBoundingClientRect();
+        const cx = t.clientX - svgRect.left;
+        const cy = t.clientY - svgRect.top;
+        const feat = _featureAtPoint(cx, cy);
+
+        if (!feat) { restoreMapAppearance(); return; }
+        if (!hasAnyData(feat)) { restoreMapAppearance(); return; }
+        if (state.selectedFeature === feat) { mobileCloseRegion(); return; }
+
+        if (state.selectedFeature !== feat) _detailSkeletonBuilt = false;
+        state.selectedFeature = feat;
+        const selVal = getFilteredValue(feat);
+        updateLegendMarker(selVal > 0 ? selVal : null, true);
+        drawCanvas();
+
+        const _sidebarWasClosed = !state.sidebarOpen;
+        if (_sidebarWasClosed) { state.sidebarOpen = true; updateSidebarToggle(); }
+        updateSidebarDetail();
+        zoomToFeature(feat, _sidebarWasClosed);
+
+        setTimeout(() => {
+          const scrollEl = sidebarInnerContent.node();
+          if (scrollEl) {
+            const scrollTop = detailsDiv.node().offsetTop - sidebarInnerContent.node().offsetTop;
+            scrollEl.scrollTo({ top: scrollTop, behavior: "smooth" });
+          }
+        }, 50);
+      });
+    }
   }
 
   function renderMap() {
-    const c = getC();
-    const _mobile = isMobile();
     invalidateFilteredValueCache();
 
     const isProvince = state.mapView === "province";
     const activeFeatures = isProvince ? provinceData.features : fixedData.features;
 
-    // Compute counts over the active feature set for the colour scale
+    // Keep feature arrays in sync with the active view
+    cdPaths = fixedData.features;
+    prPaths = provinceData.features;
+
+    // Compute counts and colour scale
     const values = activeFeatures.map(d => getFilteredValue(d)).filter(v => v > 0);
     const minVal = d3.min(values) ?? 0; const maxVal = d3.max(values) ?? 1;
     const colourScale = d3.scaleSequential([minVal, Math.max(maxVal, minVal + 1)], COLOUR_THEMES[state.currentTheme]);
     state.legendMin = minVal; state.legendMax = Math.max(maxVal, minVal + 1); state.legendColourScale = colourScale;
     if (values.length === 0) updateLegendEmpty(); else updateLegend(minVal, maxVal, colourScale);
 
-    // ── Census Division layer ────────────────────────────────────────────────
-    cdPaths = mapGroup.selectAll("path.cd-region")
-      .data(fixedData.features, d => d._cduid)
-      .join(
-        enter => {
-          const p = enter.append("path").attr("class", "cd-region");
-          _attachPathHandlers(p, "CDNAME", _mobile);
-          return p;
-        },
-        update => update
-      );
-
-    // ── Province / Territory layer ───────────────────────────────────────────
-    prPaths = mapGroup.selectAll("path.pr-region")
-      .data(provinceData.features, d => d._pruid)
-      .join(
-        enter => {
-          const p = enter.append("path").attr("class", "pr-region");
-          _attachPathHandlers(p, "PRNAME", _mobile);
-          return p;
-        },
-        update => update
-      );
-
-    // ── Per-render attribute updates ─────────────────────────────────────────
-    const _valSnapshotCD = new Map(_filteredValueCache);
-    const _valSnapshotPR = new Map(_filteredValueCachePR);
-
-    function _applyPathAttrs(sel, valSnapshot, idKey, nameKey, isVisible) {
-      if (!isVisible) {
-        sel.attr("d", path).attr("fill", "none").attr("stroke", "none").style("pointer-events", "none");
-        return;
-      }
-      sel
-        .attr("d", path)
-        .attr("stroke", d => d === state.selectedFeature ? c.accent2 : c.bg)
-        .attr("stroke-width", d => d === state.selectedFeature ? _strokeWidthSelected() : _strokeWidth())
-        .style("opacity", d => (state.selectedFeature && d !== state.selectedFeature) ? 0.35 : 1)
-        .style("pointer-events", null)
-        .attr("tabindex", d => (valSnapshot.get(d[idKey]) ?? 0) > 0 || hasAnyData(d) ? "0" : null)
-        .attr("role",     d => (valSnapshot.get(d[idKey]) ?? 0) > 0 || hasAnyData(d) ? "button" : null)
-        .attr("aria-label", d => `${d.properties[nameKey] || "Region"}, ${getTooltipLabel(valSnapshot.get(d[idKey]) ?? 0)}`)
-        .style("cursor",  d => (valSnapshot.get(d[idKey]) ?? 0) > 0 || hasAnyData(d) ? "pointer" : "default")
-        .attr("fill", d => {
-          const val = valSnapshot.get(d[idKey]) ?? 0;
-          if (val) return colourScale(val);
-          return hasAnyData(d) ? c.noData : c.noDataNone;
-        });
-    }
-
-    _applyPathAttrs(cdPaths, _valSnapshotCD, "_cduid", "CDNAME", !isProvince);
-    _applyPathAttrs(prPaths, _valSnapshotPR, "_pruid", "PRNAME",  isProvince);
-
-    cdPaths.style("display", isProvince ? "none" : null);
-    prPaths.style("display", isProvince ? null : "none");
+    drawCanvas();
   }
 
   // ─── SECTION 14: SIDEBAR DETAIL PANEL ────────────────────────────────────
@@ -2718,10 +2794,7 @@
             const selVal = getFilteredValue(provFeat);
             updateLegendMarker(selVal > 0 ? selVal : null, true);
             if (!state.sidebarOpen) { state.sidebarOpen = true; updateSidebarToggle(); }
-            prPaths.interrupt()
-              .style("opacity", f => f === provFeat ? 1 : 0.35)
-              .attr("stroke", f => f === provFeat ? getC().accent2 : getC().bg)
-              .attr("stroke-width", f => f === provFeat ? _strokeWidthSelected() : _strokeWidth());
+            drawCanvas();
             updateSidebarDetail();
             zoomToFeature(provFeat);
             return;
@@ -3460,13 +3533,8 @@
     // Re-enable the operations/industry selectors (they may have been locked)
     d3.select("#analytics-selector").property("disabled", false).style("opacity", "1").style("cursor", "pointer");
     d3.select("#industry-selector").style("pointer-events", "auto").style("opacity", "1");
-    // Cancel any in-flight D3 transitions and restore all paths to full opacity.
-    // The CSS transition on path.cd-region handles the animation.
-    const _activePaths = state.mapView === "province" ? prPaths : cdPaths;
-    _activePaths.interrupt()
-      .style("opacity", 1)
-      .attr("stroke", c.bg)
-      .attr("stroke-width", _strokeWidth());
+    // Redraw canvas with selection cleared (all regions back to full opacity)
+    drawCanvas();
     // On mobile, close the bottom sheet when a region is deselected
     if (isMobile()) {
       _isFullscreen = false;
@@ -3536,6 +3604,14 @@
     // in case the freeze is ever removed.
     const nowMobile = isMobile();
     const crossedBreakpoint = nowMobile !== _lastIsMobile;
+
+    // Capture the pre-resize dimensions BEFORE updating _lastWidth/_lastHeight.
+    // These are used below to find the geo-coordinate at the old screen centre —
+    // if we update _last* first, _oldW/_oldH equal _newW/_newH and the calculation
+    // always re-centres on the canvas midpoint instead of preserving the view.
+    const _oldW = _lastWidth;
+    const _oldH = _lastHeight;
+
     _lastWidth    = window.innerWidth;
     _lastHeight   = window.innerHeight;
     _lastIsMobile = nowMobile;
@@ -3556,8 +3632,56 @@
     }
 
     updateUI();
-    renderMap();
-    zoomToFull(false); // Refit projection to new container size after resize
+
+    // Refit the projection to the new canvas size without resetting the view.
+    // We need to refit so path coordinates match the new pixel dimensions, but
+    // we preserve the current zoom/pan state (or re-zoom to the selected feature).
+    const _svgNode = svg.node();
+    const _newW = _svgNode ? _svgNode.clientWidth  : WIDTH;
+    const _newH = _svgNode ? _svgNode.clientHeight : HEIGHT;
+
+    // Snapshot zoom transform and projection state BEFORE the refit.
+    // projection.fitExtent changes projection.scale() and projection.translate()
+    // so we must capture them first to correctly invert screen→GeoJSON coords.
+    const _tOld      = d3.zoomTransform(_svgNode);
+    const _projScaleOld = projection.scale();
+    const _projTransOld = projection.translate();
+
+    // Find the GeoJSON coordinate at the old screen centre using the OLD
+    // projection. geoIdentity maps: pixel = geoCoord * scale + translate
+    // so: geoCoord = (pixel - translate) / scale
+    const _screenCx = (_oldW || _newW) / 2;
+    const _screenCy = (_oldH || _newH) / 2;
+    const _projPxOld = (_screenCx - _tOld.x) / _tOld.k;  // undo zoom
+    const _projPyOld = (_screenCy - _tOld.y) / _tOld.k;
+    const _geoX = (_projPxOld - _projTransOld[0]) / _projScaleOld;
+    const _geoY = (_projPyOld - _projTransOld[1]) / _projScaleOld;
+
+    // Refit projection and invalidate path cache.
+    _resizeCanvas();
+    projection.fitExtent([[10, 20], [_newW - 10, _newH - 20]], fixedData);
+    invalidatePathCache();
+
+    if (state.selectedFeature) {
+      // A region is selected — re-zoom to it so it stays centred after resize.
+      renderMap();
+      zoomToFeature(state.selectedFeature);
+    } else if (state.isAtDefaultView) {
+      // At the default home view — refit cleanly to the new canvas size.
+      renderMap();
+      zoomToFull(false);
+    } else {
+      // Project the saved GeoJSON coord through the NEW projection to find
+      // its new pixel position, then re-centre on it at the same zoom level.
+      const _projScaleNew = projection.scale();
+      const _projTransNew = projection.translate();
+      const _newProjPx = _geoX * _projScaleNew + _projTransNew[0];
+      const _newProjPy = _geoY * _projScaleNew + _projTransNew[1];
+      const _newTx = _newW / 2 - _tOld.k * _newProjPx;
+      const _newTy = _newH / 2 - _tOld.k * _newProjPy;
+      svg.call(zoom.transform, d3.zoomIdentity.translate(_newTx, _newTy).scale(_tOld.k));
+      renderMap();
+    }
   }
 
   window.addEventListener("resize", () => {
@@ -3593,41 +3717,33 @@
       updateLegendMarker(selVal > 0 ? selVal : null, true);
       const _kbSidebarWasClosed = !state.sidebarOpen;
       if (_kbSidebarWasClosed) { state.sidebarOpen = true; updateSidebarToggle(); }
-      // Dim all regions and highlight the focused one using the cached selection
-      const _kbActivePaths = state.mapView === "province" ? prPaths : cdPaths;
-      _kbActivePaths.style("opacity", 0.35).attr("stroke", getC().bg).attr("stroke-width", _strokeWidth());
-      _kbActivePaths.filter(p => p === d).style("opacity", 1).attr("stroke", getC().accent2).attr("stroke-width", _strokeWidthSelected()).raise();
+      // Redraw canvas with new selection highlighted
+      drawCanvas();
       updateSidebarDetail();
       zoomToFeature(d, _kbSidebarWasClosed);
       tooltip.style("visibility", "hidden");
     }
   });
 
-  // ─── SECTION 22: APPLICATION STARTUP ─────────────────────────────────────
-  //  With all functions defined, kick off the application by:
-  //    1. Fading out the loading overlay (data is ready)
-  //    2. Building the UI (colours, controls, sidebar)
-  //    3. Drawing the initial map
+	// ─── SECTION 22: APPLICATION STARTUP ─────────────────────────────────────
+	document.body.classList.toggle("dark", state.isDark);
 
-  // Sync body.dark immediately so CSS custom-property tokens resolve correctly
-  // before updateUI() reads them via getComputedStyle.
-  document.body.classList.toggle("dark", state.isDark);
+	(function dismissLoader() {
+	  const el = document.getElementById("map-loading");
+	  if (!el) return;
+	  el.classList.add("fade-out");
+	  // Remove once the fade transition ends, or after 600ms as a fallback
+	  // in case transitionend doesn't fire (e.g. transition not defined in CSS).
+	  const remove = () => el.remove();
+	  el.addEventListener("transitionend", remove, { once: true });
+	  setTimeout(remove, 600);
+	})();
 
-  // Dismiss the CSS spinner injected in index.html.
-  // Trigger the CSS fade-out transition first, then remove the node once the
-  // 400 ms animation completes so it can't intercept clicks or be tab-focused.
-  (function dismissLoader() {
-    const el = document.getElementById("map-loading");
-    if (!el) return;
-    el.classList.add("fade-out");
-    el.addEventListener("transitionend", () => el.remove(), { once: true });
-  })();
-
-  updateUI();
-  renderMap();
-  // Defer the initial fit by two frames: the first lets the browser finish
-  // laying out the sidebar and map container (so clientWidth/clientHeight are
-  // correct), the second ensures the legend overlay has been painted and has a
-  // non-zero offsetHeight so the legend-overlap compensation fires correctly.
-  requestAnimationFrame(() => requestAnimationFrame(() => zoomToFull(false)));
+	_attachCanvasHandlers();
+	updateUI();
+	requestAnimationFrame(() => requestAnimationFrame(() => {
+	  _resizeCanvas();
+	  renderMap();
+	  zoomToFull(false);
+	}));
 })(); // The outer function is invoked immediately — the map loads as soon as the script runs
