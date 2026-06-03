@@ -2991,8 +2991,8 @@
       .style("top", "auto")   // overridden by JS when shown
       .style("left", "16px")
       .style("z-index", "300")
-      .style("min-width", "220px")
-      .style("max-width", "260px")
+      .style("min-width", "300px")
+      .style("max-width", "320px")
       .style("padding", "10px 12px")
       .style("border-radius", "6px")
       .style("box-shadow", "0 4px 16px rgba(0,0,0,0.18)")
@@ -3002,9 +3002,9 @@
 
     // Tooltip inner content
     [
-	  { icon: "•", iconColor: "#6b7280", label: "Any", desc: "Show regions regardless of this industry."},
-      { icon: "✓", iconColor: c.accent, label: "Include", desc: "Show regions that match this industry."},
-      { icon: "✕", iconColor: state.isDark ? "#fca5a5" : "#dc2626", label: "Exclude", desc: "Hide regions that match this industry."},
+	  { icon: "•", iconColor: "#6b7280", label: "Any", desc: "Count facilities regardless of this industry."},
+      { icon: "✓", iconColor: c.accent, label: "Include", desc: "Count facilities that match this industry."},
+      { icon: "✕", iconColor: state.isDark ? "#fca5a5" : "#dc2626", label: "Exclude", desc: "Don't count facilities that match this industry."},
     ].forEach(({ icon, iconColor, label, desc }) => {
       const row = industryInfoTip.append("div")
         .style("display", "flex")
@@ -3024,6 +3024,7 @@
         .text(label + ": ");
       textCol.append("span")
         .style("font-size", "11px").style("color", c.muted)
+		.style("white-space", "nowrap")
         .text(desc);
     });
 
