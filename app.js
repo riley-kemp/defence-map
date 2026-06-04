@@ -1464,6 +1464,15 @@
     drawCanvas();
   }
 
+  // Cached projected bounding box of Canada (pixel coords under identity zoom).
+  // Set by updateCanadaBounds() after every projection.fitExtent() call.
+  // Used by the zoom "end" handler — storing it avoids re-running path.bounds()
+  // on every gesture.
+  let _canadaBounds = null;
+  function updateCanadaBounds() {
+    _canadaBounds = path.bounds({ type: "FeatureCollection", features: fixedData.features });
+  }
+
   const zoom = d3.zoom()
     .scaleExtent([0.6, 40])
 	.on("start", (event) => {
@@ -1510,6 +1519,57 @@
 	  state.isZooming = false;
 	  state.isPanning = false;
 	  _applyZoomTransform(x, y, k);
+
+	  // ── Soft pan clamp ────────────────────────────────────────────────────
+	  // After a manual gesture, check if Canada has been panned so far that
+	  // it's nearly invisible. If so, nudge it back — but only enough to keep
+	  // a meaningful sliver of Canada on screen; we never force a specific position.
+	  //
+	  // Invariant: Canada's screen bounding box must overlap the viewport by at
+	  // least MIN_OVERLAP px on each axis. We only correct when that's violated.
+	  // This works correctly at all zoom levels:
+	  //   - Zoomed out: Canada is larger than the viewport, both screen edges are
+	  //     outside the viewport — but the overlap check passes, so no correction.
+	  //   - Zoomed in: Canada is smaller than the viewport; the clamp only fires
+	  //     when Canada is panned so far that less than MIN_OVERLAP px is visible.
+	  if (!event.sourceEvent || !_canadaBounds) return;
+
+	  const svgNode = svg.node();
+	  const w = svgNode ? svgNode.clientWidth  : WIDTH;
+	  const h = svgNode ? svgNode.clientHeight : HEIGHT;
+
+	  const [[bx0, by0], [bx1, by1]] = _canadaBounds;
+	  // Canada's bounding box projected to screen space at current zoom/pan
+	  const sx0 = bx0 * k + x;  // left edge
+	  const sy0 = by0 * k + y;  // top edge
+	  const sx1 = bx1 * k + x;  // right edge
+	  const sy1 = by1 * k + y;  // bottom edge
+
+	  // Minimum overlap (px) required between Canada and the viewport on each axis.
+	  // Fixed at 80px — large enough to always be grabbable, small enough to
+	  // feel generous. Does not scale with zoom so behaviour is consistent.
+	  const MIN_OVERLAP = 80;
+
+	  // Compute correction on each axis independently.
+	  // We only correct if Canada's box has scrolled so far that less than
+	  // MIN_OVERLAP pixels of it remain inside the viewport on that axis.
+	  // dx > 0 → nudge right (Canada went too far left)
+	  // dx < 0 → nudge left  (Canada went too far right)
+	  let dx = 0;
+	  if (sx1 < MIN_OVERLAP)        dx = MIN_OVERLAP - sx1;        // right edge past left side
+	  else if (sx0 > w - MIN_OVERLAP) dx = (w - MIN_OVERLAP) - sx0; // left edge past right side
+
+	  let dy = 0;
+	  if (sy1 < MIN_OVERLAP)        dy = MIN_OVERLAP - sy1;        // bottom edge past top
+	  else if (sy0 > h - MIN_OVERLAP) dy = (h - MIN_OVERLAP) - sy0; // top edge past bottom
+
+	  if (dx !== 0 || dy !== 0) {
+	    _isProgrammaticZoom = true;
+	    svg.transition().duration(300).call(
+	      zoom.transform,
+	      d3.zoomIdentity.translate(x + dx, y + dy).scale(k)
+	    );
+	  }
 	})
 
   // Attach the zoom behavior to the SVG canvas
@@ -1599,6 +1659,8 @@
     // Projection changed — Path2D cache is stale; invalidate so next
     // drawCanvas() recomputes paths for the new pixel space.
     invalidatePathCache();
+    // Bounds changed — refresh cached Canada bbox for the pan clamp.
+    updateCanadaBounds();
 
     // ── Desktop legend-overlap compensation ─────────────────────────────────
     // On desktop, the legend sits bottom-right. If its bounding box would cover
@@ -3662,6 +3724,8 @@
     _resizeCanvas();
     projection.fitExtent([[10, 20], [_newW - 10, _newH - 20]], fixedData);
     invalidatePathCache();
+    // Bounds changed — refresh cached Canada bbox for the pan clamp.
+    updateCanadaBounds();
 
     if (state.selectedFeature) {
       // A region is selected — re-zoom to it so it stays centred after resize.
