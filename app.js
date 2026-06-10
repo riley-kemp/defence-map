@@ -203,6 +203,7 @@
     currentIndustries: new Map(),      // Which industry chips are active and their mode ("include" / "exclude")
     industryFilterMode: "and",         // Whether "include" chips require ALL ("and") or ANY ("or") matches
     currentTheme: "Classic",           // Which colour theme is applied to the choropleth
+    currentScale: "Linear",            // Which binning method maps facility counts to colours ("Linear", "Log", "Sqrt")
     isDark: window.matchMedia?.("(prefers-color-scheme: dark)").matches ?? false, // Respects the user's OS dark mode preference
     selectedFeature: null,             // The GeoJSON feature (Census Division) that is currently clicked/highlighted
     hoveredFeature: null,              // The GeoJSON feature currently under the mouse cursor (desktop)
@@ -1238,9 +1239,11 @@
 
   // The legend overlay box (bottom-right on desktop, top-left on mobile).
   // Shows the colour scale and swatch key for the choropleth.
-  // On mobile the legend top matches the control panel (max(12px,...)) and its
-  // Mobile legend height = 3 buttons × 44px + 2 gaps × 6px, same in both portrait and landscape
-  const _legendH = _setupMobile ? "144px" : null;
+  // On mobile the legend top matches the control panel (max(12px,...)).
+  // Height is content-driven (was a fixed 144px before the scale-selector row
+  // was added, which clipped it); zoom/recentre code measures the rendered
+  // rect via getBoundingClientRect, so the dynamic height is handled correctly.
+  const _legendH = null;
   const legendOverlay = mapContainer.append("div")
     .attr("class", "legend-overlay")
     .style("position", "absolute")
@@ -1251,7 +1254,7 @@
     .style("height", _legendH)
     .style("backdrop-filter", isMobile() ? "none" : "blur(15px)")
     .style("background", isMobile() ? (state.isDark ? "#161b24" : "#ffffff") : null)
-    .style("padding", _setupMobile ? "10px 12px" : "20px")
+    .style("padding", _setupMobile ? "8px 10px" : "14px 16px")
     .style("border-radius", "6px")
     .style("min-width", _setupMobile ? null : "260px")
     .style("max-width", _setupMobile ? "calc(100vw - 80px)" : null)
@@ -1269,6 +1272,34 @@
     Heat:    d3.interpolateRgbBasis(["#fce2c5", "#a60303"]),
     Plasma:  d3.interpolatePlasma,
   };
+
+  // ─── SECTION 9b: COLOUR SCALE BINNING METHODS ────────────────────────────
+  //  Each entry is a different way of mapping facility counts onto the 0–1
+  //  range fed into the colour theme above. Users switch methods with the
+  //  small buttons inside the legend (below the theme buttons).
+  //    Linear — equal count increments get equal colour increments.
+  //    Log    — emphasises differences among low counts; useful when a few
+  //             regions have very high counts that wash everything else out.
+  //    Sqrt   — a milder version of Log (square-root transform).
+  const SCALE_TYPES = ["Linear", "Log", "Sqrt"];
+
+  // Builds the value→colour function for the current theme + binning method.
+  //   min, max — the count domain (max already guarded to be > min by caller)
+  // The returned function is callable as scale(value) → colour string for
+  // every method, so drawCanvas() and the legend can use it interchangeably.
+  function buildColourScale(min, max) {
+    const interp = COLOUR_THEMES[state.currentTheme];
+    switch (state.currentScale) {
+      case "Log":
+        // Log scales cannot include 0 in their domain; counts shown are ≥ 1
+        // anyway, but clamp defensively.
+        return d3.scaleSequentialLog([Math.max(1, min), Math.max(max, Math.max(1, min) + 1)], interp);
+      case "Sqrt":
+        return d3.scaleSequentialSqrt([min, max], interp);
+      default: // "Linear"
+        return d3.scaleSequential([min, max], interp);
+    }
+  }
 
   // ─── SECTION 10: MAP PROJECTION & ZOOM ───────────────────────────────────
   //  A "projection" converts latitude/longitude coordinates from the GeoJSON
@@ -1584,8 +1615,8 @@
     const dx = x1 - x0; const dy = y1 - y0;
 
     if (isMobile()) {
-      // Measure the legend's actual rendered bottom so landscape (short viewport)
-      // is handled correctly — the fixed 144px is only valid in portrait.
+      // Measure the legend's actual rendered bottom — its height is
+      // content-driven, so it varies with text wrapping and orientation.
       const legendNode   = legendOverlay.node();
       const legendRect   = legendNode ? legendNode.getBoundingClientRect() : null;
       const svgTop       = svgNode ? svgNode.getBoundingClientRect().top : 0;
@@ -1807,7 +1838,7 @@
         .style("font-size", "10px")
         .style("font-weight", "600")
         .style("letter-spacing", "1.2px")
-        .style("margin-bottom", isMobile() ? "6px" : "12px")
+        .style("margin-bottom", isMobile() ? "5px" : "9px")
         .text("DEFENCE FACILITY COUNT");
 
       // SVG bar
@@ -1818,10 +1849,8 @@
         .style("display", "block");
 
       const grad = svgL.append("defs").append("linearGradient").attr("id", gradId);
-      // Three colour-stop placeholders; offsets are fixed, colours are updated below
-      [0, 0.5, 1].forEach((t, i) =>
-        grad.append("stop").attr("class", `legend-stop-${i}`).attr("offset", `${t * 100}%`)
-      );
+      // Colour stops are created/updated per-render (see below) because the
+      // colour at each position depends on the active binning method.
 
       svgL.append("rect")
         .attr("width", BAR_WIDTH).attr("height", BAR_HEIGHT).attr("rx", 2)
@@ -1864,7 +1893,7 @@
       ].forEach(({ id, label }) => {
         const row = swatchDiv.append("div")
           .style("display", "flex").style("align-items", "flex-start")
-          .style("gap", "8px").style("margin-bottom", isMobile() ? "3px" : "6px");
+          .style("gap", "8px").style("margin-bottom", isMobile() ? "3px" : "4px");
         row.append("div")
           .attr("id", id)
           .style("width", "16px").style("min-width", "16px").style("height", "10px")
@@ -1878,7 +1907,15 @@
       // Theme switcher button row — use D3 join so buttons persist across renders
       legendOverlay.append("div")
         .attr("id", "legend-theme-row")
-        .style("margin-top", isMobile() ? "15px" : "15px")
+        .style("margin-top", isMobile() ? "10px" : "10px")
+        .style("display", "flex")
+        .style("justify-content", "space-between")
+        .style("gap", "4px");
+
+      // Scale (binning method) switcher row — same pattern as the theme row
+      legendOverlay.append("div")
+        .attr("id", "legend-scale-row")
+        .style("margin-top", "4px")
         .style("display", "flex")
         .style("justify-content", "space-between")
         .style("gap", "4px");
@@ -1895,10 +1932,26 @@
     svgL.select("rect").attr("width", BAR_WIDTH);
     svgL.select("#legend-label-max").attr("x", BAR_WIDTH);
 
-    [0, 0.5, 1].forEach((t, i) =>
-      svgL.select(`.legend-stop-${i}`)
-        .attr("stop-color", colourScale(min + t * (max - min)))
-    );
+    // Gradient colour stops — rebuilt per render so the bar reflects the
+    // active binning method. The bar's axis stays LINEAR in value (so the
+    // min/max labels and hover marker maths are unchanged); the scale is
+    // sampled at many evenly-spaced values, which makes the non-linear
+    // colour ramp of Log/Sqrt visible along the bar.
+    // Note: span is intentionally NOT clamped to a minimum. When the filters
+    // leave every shown division at the same count (min === max, e.g. all 1),
+    // span is 0 and every stop samples colourScale(min) — a single flat
+    // colour, matching how the divisions themselves are painted.
+    const span = max - min;
+    const N = 24; // enough samples that Log/Sqrt curves look smooth
+    const stops = d3.range(N + 1).map(i => {
+      const t = i / N;
+      return { offset: t, color: colourScale(min + t * span) };
+    });
+    svgL.select(`#${gradId}`).selectAll("stop")
+      .data(stops)
+      .join("stop")
+        .attr("offset", d => `${d.offset * 100}%`)
+        .attr("stop-color", d => d.color);
 
     // Min / max labels
     svgL.select("#legend-label-min").style("fill", c.text).text(min.toLocaleString());
@@ -1922,7 +1975,7 @@
         .style("color",       d => d === state.currentTheme ? c.accent : c.muted)
         .style("border",      d => d === state.currentTheme ? `1px solid ${c.accent}` : `1px solid ${c.border}`)
         .style("transform",   "scale(1)")
-        .style("padding", "10px 0").style("font-size", "8.5px").style("cursor", "pointer")
+        .style("padding", "7px 0").style("font-size", "8.5px").style("cursor", "pointer")
         .style("border-radius", "3px").style("text-transform", "uppercase")
         .style("font-family", "'Inter', sans-serif").style("transition", "all 0.2s ease")
         .on("mouseenter", function(_, d) {
@@ -1934,6 +1987,30 @@
             d3.select(this).style("border", `1px solid ${c.border}`).style("transform", "scale(1)");
         })
         .on("click", (_, d) => { state.currentTheme = d; renderMap(); });
+
+    // Scale (binning method) buttons — identical join pattern to themes above
+    legendOverlay.select("#legend-scale-row")
+      .selectAll("button")
+      .data(SCALE_TYPES)
+      .join("button")
+        .text(d => d)
+        .style("flex", "1")
+        .style("background",  d => d === state.currentScale ? (state.isDark ? "rgba(78,204,163,0.1)" : "rgba(5,150,105,0.1)") : "transparent")
+        .style("color",       d => d === state.currentScale ? c.accent : c.muted)
+        .style("border",      d => d === state.currentScale ? `1px solid ${c.accent}` : `1px solid ${c.border}`)
+        .style("transform",   "scale(1)")
+        .style("padding", "7px 0").style("font-size", "8.5px").style("cursor", "pointer")
+        .style("border-radius", "3px").style("text-transform", "uppercase")
+        .style("font-family", "'Inter', sans-serif").style("transition", "all 0.2s ease")
+        .on("mouseenter", function(_, d) {
+          if (d !== state.currentScale)
+            d3.select(this).style("border", `1px solid ${c.accent}`).style("transform", "scale(1.08)");
+        })
+        .on("mouseleave", function(_, d) {
+          if (d !== state.currentScale)
+            d3.select(this).style("border", `1px solid ${c.border}`).style("transform", "scale(1)");
+        })
+        .on("click", (_, d) => { state.currentScale = d; renderMap(); });
 
     // Restore marker for the currently-selected region (if any)
     if (state.selectedFeature) {
@@ -2211,7 +2288,7 @@
     // Compute counts and colour scale
     const values = activeFeatures.map(d => getFilteredValue(d)).filter(v => v > 0);
     const minVal = d3.min(values) ?? 0; const maxVal = d3.max(values) ?? 1;
-    const colourScale = d3.scaleSequential([minVal, Math.max(maxVal, minVal + 1)], COLOUR_THEMES[state.currentTheme]);
+    const colourScale = buildColourScale(minVal, Math.max(maxVal, minVal + 1));
     state.legendMin = minVal; state.legendMax = Math.max(maxVal, minVal + 1); state.legendColourScale = colourScale;
     if (values.length === 0) updateLegendEmpty(); else updateLegend(minVal, maxVal, colourScale);
 
@@ -3540,7 +3617,7 @@
 
     // Re-apply grid layout and legend height in case orientation changed
     controlPanel.style("grid-template-columns", isLandscapeMobile() ? "1fr 1fr" : "1fr");
-    legendOverlay.style("height", isMobile() ? "144px" : null);
+    legendOverlay.style("height", null); // content-driven on all layouts (fixed 144px clipped the scale-selector row)
     if (isMobile()) legendOverlay.style("background", state.isDark ? "#161b24" : "#ffffff");
 
     buildControlsDOM();        // Build the sidebar controls if not already built
